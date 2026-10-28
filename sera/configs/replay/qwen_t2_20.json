@@ -1,0 +1,26 @@
+{
+  "dataset": "allenai/Sera-4.6-Lite-T2",
+  "revision": "d7d753f319f688797b8183c6668b17670992bdeb",
+  "instance_ids": [
+    "tinydb_10309",
+    "ptyprocess_10174",
+    "cantools_10317",
+    "sqlglot_10356",
+    "python-markdownify_10066",
+    "usaddress_10037",
+    "autograd_10327",
+    "stackprinter_10129",
+    "Red-DiscordBot_10415",
+    "nikola_10282",
+    "sqlfluff_10176",
+    "pygments_10046",
+    "gunicorn_10295",
+    "line_profiler_10345",
+    "word_cloud_10298",
+    "funcy_10189",
+    "python-dotenv_10136",
+    "cookiecutter_10175",
+    "starlette_10129",
+    "patsy_10053"
+  ]
+}

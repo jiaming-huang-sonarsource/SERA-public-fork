@@ -56,13 +56,14 @@ def upstream_request(payload):
 
 
 class Proxy:
-    def __init__(self, upstream, records, timeout=900):
+    def __init__(self, upstream, records, timeout=900, context_window=None):
         self.upstream = upstream.rstrip("/")
         if not self.upstream.endswith("/v1"):
             raise ValueError("Upstream must end with /v1")
         self.records = Path(records)
         self.records.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
+        self.context_window = context_window
 
     def request(self, path, payload=None, authorization=None):
         headers = {"Content-Type": "application/json"}
@@ -84,6 +85,27 @@ class Proxy:
             if payload.get("stream"):
                 raise ValueError("This SERA recorder accepts non-streaming requests only")
             record["request"] = upstream_request(payload)
+            if self.context_window is not None:
+                request = record["request"]
+                output_tokens = request.get("max_tokens")
+                if not isinstance(output_tokens, int) or output_tokens <= 0:
+                    raise ValueError("Set a positive max_tokens output reserve")
+                # Count exactly the same messages, tools and native template as chat.
+                tokenize = {key: request[key] for key in (
+                    "model", "messages", "tools", "chat_template_kwargs",
+                    "add_generation_prompt", "continue_final_message", "add_special_tokens",
+                ) if key in request}
+                status, tokens = self.request("/tokenize", tokenize, authorization)
+                record["tokenization"] = tokens
+                if status != 200:
+                    record["response"] = tokens
+                    return status, tokens
+                if tokens["max_model_len"] != self.context_window:
+                    raise ValueError("Serving context differs from the fixed experiment config")
+                if tokens["count"] + output_tokens > self.context_window:
+                    raise ValueError("Input plus output reserve is longer than the model's context length")
+                request["return_token_ids"] = True
+            status = 502
             status, response = self.request("/v1/chat/completions", record["request"], authorization)
             record["response"] = response
             if status == 200:
@@ -142,8 +164,9 @@ def main():
     parser.add_argument("--upstream", required=True, help="Actual Qwen endpoint ending in /v1")
     parser.add_argument("--records", required=True, help="Directory for original API request/response records")
     parser.add_argument("--port", type=int, default=18001)
+    parser.add_argument("--context-window", type=int, default=131072)
     args = parser.parse_args()
-    with Proxy(args.upstream, args.records).server(port=args.port) as server:
+    with Proxy(args.upstream, args.records, context_window=args.context_window).server(port=args.port) as server:
         print(f"SERA endpoint: http://127.0.0.1:{server.server_port}/v1", flush=True)
         try:
             server.serve_forever()

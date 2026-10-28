@@ -1,0 +1,21 @@
+{
+  "repo_id": "Qwen/Qwen3.8-27B",
+  "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "served_model": "Qwen3.8-27B-1d4bf0f",
+  "sweagent_revision": "a593220bfdf9e07f7761179977b8ddf02fa981d5",
+  "context_window": 131072,
+  "max_output_tokens": 8192,
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "seed": 42,
+  "extra_body": {
+    "top_k": 20,
+    "min_p": 0.0,
+    "repetition_penalty": 1.0,
+    "chat_template_kwargs": {
+      "enable_thinking": true,
+      "preserve_thinking": true,
+      "reasoning_effort": "xhigh"
+    }
+  }
+}

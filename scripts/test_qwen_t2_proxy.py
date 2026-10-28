@@ -78,6 +78,32 @@ class ProxyTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 upstream_request(payload)
 
+    def test_native_budget_counts_tools_thinking_and_output_reserve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proxy = Proxy("http://localhost:8000/v1", tmp, context_window=131072)
+            calls = []
+            count = 122880
+            def request(path, payload, authorization):
+                calls.append((path, payload))
+                if path == "/tokenize":
+                    return 200, {"count": count, "max_model_len": 131072, "tokens": [1, 2]}
+                return 200, self.response()
+            proxy.request = request
+            payload = {"model": "qwen", "max_tokens": 8192, "tools": [],
+                       "chat_template_kwargs": {"preserve_thinking": True},
+                       "messages": [{"role": "assistant", "content": "<think>reason</think>answer"}]}
+            self.assertEqual(proxy.complete(payload)[0], 200)
+            self.assertEqual(calls[0][1]['messages'][0]['reasoning'], 'reason')
+            self.assertEqual(calls[0][1]['tools'], [])
+            self.assertEqual(calls[0][1]['chat_template_kwargs'], payload['chat_template_kwargs'])
+            self.assertTrue(calls[1][1]['return_token_ids'])
+            count += 1
+            calls.clear()
+            self.assertEqual(proxy.complete(payload)[0], 400)
+            self.assertEqual(len(calls), 1)  # Never generate over budget or truncate history.
+            records = [json.loads(p.read_text()) for p in Path(tmp).glob('*.json')]
+            self.assertTrue(all(r['tokenization']['tokens'] == [1, 2] for r in records))
+
 
 if __name__ == "__main__":
     unittest.main()
