@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from qwen_t2_proxy import Proxy, agent_response
+from qwen_t2_proxy import Proxy, agent_response, upstream_request
 
 
 class ProxyTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(status, 200)
             record = json.loads(next(Path(tmp).glob("*.json")).read_text())
             self.assertEqual(record["response"], self.response())
-            self.assertEqual(record["request"], payload)
+            self.assertEqual(record["request"], dict(payload, parallel_tool_calls=False))
             self.assertEqual(record["agent_response"], response)
             self.assertNotIn("never-record-this", json.dumps(record))
 
@@ -46,6 +46,37 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(proxy.complete({}), (400, error))
             self.assertEqual(proxy.complete({"stream": True})[0], 400)
             self.assertEqual(len(list(Path(tmp).glob("*.json"))), 2)
+
+    def test_history_roundtrip_preserves_thinking_commentary_and_tools(self):
+        response = self.response()
+        message = agent_response(response)["choices"][0]["message"]
+        # The pinned agent keeps content/tools and discards independent reasoning.
+        saved = {key: message[key] for key in ("role", "content", "tool_calls")}
+        payload = {"messages": [{"role": "user", "content": "literal <think>user</think>"},
+                                saved, {"role": "tool", "tool_call_id": "call_1", "content": "observation"}]}
+        original = copy.deepcopy(payload)
+        forwarded = upstream_request(payload)
+        self.assertEqual(payload, original)
+        self.assertEqual(forwarded["messages"][1], response["choices"][0]["message"])
+        self.assertEqual(forwarded["messages"][0], payload["messages"][0])
+        self.assertEqual(forwarded["messages"][2], payload["messages"][2])
+
+    def test_empty_thinking_and_legacy_field_roundtrip(self):
+        payload = {"messages": [{"role": "assistant", "content": "<think></think>  answer\n"}]}
+        self.assertEqual(upstream_request(payload)["messages"][0],
+                         {"role": "assistant", "reasoning": "", "content": "  answer\n"})
+        legacy = {"messages": [{"role": "assistant", "reasoning_content": "old", "content": "answer"}]}
+        self.assertEqual(upstream_request(legacy)["messages"][0]["reasoning"], "old")
+
+    def test_ambiguous_history_and_parallel_calls_are_rejected(self):
+        for payload in [
+            {"parallel_tool_calls": True}, {"n": 2},
+            {"messages": [{"role": "assistant", "content": "<think>unfinished"}]},
+            {"messages": [{"role": "assistant", "content": "<think>a</think>b", "reasoning": "different"}]},
+            {"messages": [{"role": "assistant", "reasoning": "a", "reasoning_content": "b"}]},
+        ]:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                upstream_request(payload)
 
 
 if __name__ == "__main__":

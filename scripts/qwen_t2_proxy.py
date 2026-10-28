@@ -26,6 +26,35 @@ def agent_response(response):
     return result
 
 
+def upstream_request(payload):
+    """Undo only our leading think annotation on assistant messages."""
+    result = copy.deepcopy(payload)
+    if result.get("parallel_tool_calls") or result.get("n", 1) != 1:
+        raise ValueError("SERA requires one completion and one tool call per step")
+    result["parallel_tool_calls"] = False
+    for message in result.get("messages", []):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        reasoning = message.get("reasoning", message.get("reasoning_content"))
+        legacy = message.get("reasoning_content")
+        if reasoning is not None and legacy is not None and reasoning != legacy:
+            raise ValueError("Conflicting reasoning fields")
+        if isinstance(content, str) and content.startswith("<think>"):
+            end = content.find("</think>", len("<think>"))
+            if end < 0:
+                raise ValueError("Unclosed assistant think annotation")
+            tagged = content[len("<think>"):end]
+            if reasoning is not None and tagged != reasoning:
+                raise ValueError("Reasoning differs from the assistant think annotation")
+            reasoning = tagged
+            message["content"] = content[end + len("</think>"):]
+        if reasoning is not None:
+            message["reasoning"] = reasoning
+            message.pop("reasoning_content", None)
+    return result
+
+
 class Proxy:
     def __init__(self, upstream, records, timeout=900):
         self.upstream = upstream.rstrip("/")
@@ -54,7 +83,7 @@ class Proxy:
         try:
             if payload.get("stream"):
                 raise ValueError("This SERA recorder accepts non-streaming requests only")
-            record["request"] = copy.deepcopy(payload)
+            record["request"] = upstream_request(payload)
             status, response = self.request("/v1/chat/completions", record["request"], authorization)
             record["response"] = response
             if status == 200:
