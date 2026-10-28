@@ -84,7 +84,7 @@ class ClusterRunnerTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     runner.worker(runner.UPSTREAM)
             status = json.loads((root / 'result/worker-status.json').read_text())
-            self.assertEqual(status, {'status': 'failed', 'returncode': 1, 'error': 'startup failed'})
+            self.assertEqual(status, {'status': 'failed', 'returncode': 1, 'error': 'startup failed', 'api_calls': 0})
 
     def test_interrupt_stops_inference_collects_records_and_cleans_exact_resource(self):
         events = []
@@ -122,6 +122,7 @@ class ClusterRunnerTests(unittest.TestCase):
             self.assertEqual(json.loads((out / 'api/attempt.json').read_text())['status'], 'in_flight')
             state = json.loads((out / 'run.json').read_text())['tasks'][0]
             self.assertEqual(state['status'], 'interrupted')
+            self.assertEqual(state['api_calls'], 1)
             self.assertTrue(state['cleaned_up'])
 
 

@@ -257,6 +257,8 @@ def task(cluster, instance, reference, source, out, receipt, upstream, timeout):
                 for category in ('trajs', 'api'):
                     directory = result_dir / category
                     if directory.exists():
+                        if category == 'api':
+                            state['api_calls'] = len(list(directory.glob('*.json')))
                         (out / category).mkdir(exist_ok=True)
                         for item in directory.iterdir():
                             target = out / category / item.name
@@ -311,6 +313,7 @@ def worker(upstream):
         status['error'] = str(error)
         raise
     finally:
+        status['api_calls'] = len(list((out / 'api').glob('*.json')))
         write_json(out / 'worker-status.json', status)
     return status['returncode']
 
