@@ -70,6 +70,18 @@ def input_lines(source):
 
 
 def prepare(args):
+    selection_path = getattr(args, "selection", None)
+    wanted = None
+    if selection_path:
+        selection = json.loads(Path(selection_path).read_text())
+        ids = selection["instance_ids"]
+        if not ids or not isinstance(ids, list) or len(ids) != len(set(ids)):
+            raise ValueError("Selection must contain a nonempty list of unique instance IDs")
+        if selection["revision"] != REVISION:
+            raise ValueError("Selection revision does not match the pinned dataset revision")
+        if args.repo or args.per_repo or (args.limit and args.limit < len(ids)):
+            raise ValueError("Selection conflicts with repository filters or the task cap")
+        wanted = set(ids)
     out = Path(args.out)
     # Refuse to replace an existing selection or silently change a resumed run.
     if out.exists() and any(out.iterdir()):
@@ -88,6 +100,8 @@ def prepare(args):
                 continue
             scanned += 1
             row = json.loads(line)
+            if wanted is not None and row["instance_id"] not in wanted:
+                continue
             image = row["docker_image"]
             if image not in mapping:
                 raise ValueError(f"Image absent from sera/constants.py: {image}")
@@ -119,8 +133,14 @@ def prepare(args):
             })
             selected.append(dict(row, repo=repo, base_commit=repo_info["base_commit"]))
             counts[repo] += 1
-            if args.limit and len(selected) >= args.limit:
+            if (wanted is not None and seen == wanted) or (args.limit and len(selected) >= args.limit):
                 break
+    if wanted is not None:
+        if missing := wanted - seen:
+            raise ValueError(f"Selected tasks absent from source: {sorted(missing)}")
+        order = {iid: i for i, iid in enumerate(ids)}
+        instances.sort(key=lambda item: order[item["instance_id"]])
+        selected.sort(key=lambda item: order[item["instance_id"]])
     if not selected:
         raise ValueError("No matching tasks")
     instances_path = out / "instances.json"
@@ -138,10 +158,14 @@ def prepare(args):
         "published_revision": REVISION if args.source == DATA_URL else None,
         "scanned_rows": scanned,
         "selected_rows": len(selected),
-        "selection": "first matching rows in source order; no random sampling",
+        "selection": "fixed instance ID list" if wanted is not None else "first matching rows in source order; no random sampling",
+        "instance_ids": [row["instance_id"] for row in selected],
         "per_repo": dict(sorted(counts.items())),
         "instances_sha256": hashlib.sha256(instances_path.read_bytes()).hexdigest(),
     }
+    if selection_path:
+        manifest["selection_revision"] = selection["revision"]
+        manifest["selection_file_sha256"] = hashlib.sha256(Path(selection_path).read_bytes()).hexdigest()
     write_json(out / "manifest.json", manifest)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 
@@ -170,14 +194,25 @@ def trajectory_metrics(history):
     calls = [c for m in assistants for c in (m.get("tool_calls") or [])]
     names = [c["function"]["name"] for c in calls]
     contents = [text_content(m) for m in assistants]
+    reasoning = []
+    assistant_chars = 0
+    for message, content in zip(assistants, contents):
+        explicit = message.get('reasoning')
+        if explicit is None:
+            explicit = message.get('reasoning_content')
+        tagged = re.findall(r"<think>(.*?)</think>", content, re.S)
+        reasoning.append(len(explicit) if explicit is not None else
+                         sum(map(len, tagged)) if tagged else None)
+        assistant_chars += len(content) + (len(explicit) if explicit is not None and not tagged else 0)
+    unknown = sum(value is None for value in reasoning)
     return {
         "assistant_turns": len(assistants),
         "tool_calls": len(calls),
         "tool_counts": dict(Counter(names)),
         "tool_sequence": names,
-        "assistant_chars": sum(len(c) for c in contents),
-        "visible_think_chars": sum(len(t) for c in contents
-                                  for t in re.findall(r"<think>(.*?)</think>", c, re.S)),
+        "assistant_chars": assistant_chars,
+        "visible_think_chars": None if unknown else sum(reasoning),
+        "reasoning_boundary_unknown_turns": unknown,
         "has_submit_call": "submit" in names,
     }
 
@@ -254,6 +289,7 @@ def main():
     prep.add_argument("--limit", type=int, default=100, help="Total task cap; 0 means all")
     prep.add_argument("--repo", action="append", help="Optional exact org/repo; repeatable")
     prep.add_argument("--per-repo", type=int, default=0, help="Per-repository cap; 0 means no cap")
+    prep.add_argument("--selection", help="JSON file containing a pinned revision and fixed instance_ids")
     prep.set_defaults(func=prepare)
     comp = commands.add_parser("compare", help="Compare all selected IDs, including failures and missing outputs")
     comp.add_argument("--references", required=True)

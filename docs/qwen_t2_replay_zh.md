@@ -1,78 +1,55 @@
 # 用 Qwen 重跑 SERA T2
 
-用自托管 Qwen 重跑[已发布的 T2 任务](https://huggingface.co/datasets/allenai/Sera-4.6-Lite-T2)，与原始 GLM 轨迹逐任务比较。
+固定 20 条[已发布 T2 任务](https://huggingface.co/datasets/allenai/Sera-4.6-Lite-T2)，用原版 SERA agent 生成 Qwen 轨迹。每个仓库一条；人工排除了明显描述错配和只有格式错误的记录，因此不是随机评估集。
 
-## 1. 准备环境
-
-在可使用 Docker 的 Linux x86_64 机器上执行，所有命令从 SERA 仓库根目录运行。模型服务可部署在另一台机器。
+在有 Docker 的 Linux x86_64 主机上，从仓库根目录执行：
 
 ```bash
-conda create -n sera-replay python=3.12 -y
-conda activate sera-replay
 git submodule update --init modules/SERA-SWE-Agent
-pip install -e . -e modules/code2flow -e modules/SERA-SWE-Agent
-docker info
-```
-
-填写服务地址和 `/v1/models` 返回的模型 ID；需要认证时设置真实 API key。服务必须返回结构化 `tool_calls`。
-
-```bash
+# Python 3.12
+pip install -e modules/SERA-SWE-Agent -r sera/configs/replay/requirements.txt
 export QWEN_BASE_URL='http://YOUR_HOST:YOUR_PORT/v1'
-export QWEN_MODEL_ID='YOUR_SERVED_MODEL_ID'
 export OPENAI_API_KEY="${OPENAI_API_KEY:-not-needed}"
-curl -sS "$QWEN_BASE_URL/models" -H "Authorization: Bearer $OPENAI_API_KEY"
 ```
 
-## 2. 准备任务
+服务使用原生模板、`qwen3` reasoning parser 和 `qwen3_coder` tool parser，并开放 `/tokenize`。固定模型版本及采样参数见 [qwen_128k.json](../sera/configs/replay/qwen_128k.json)：128K 总上下文，每次预留 8192 输出 token（含思考），输入最多 122880；保留历史思考、每步一个工具、115 次调用、串行执行。该预算和采样设置不保证与历史 GLM 相同。
 
-先取前 100 条试跑；这不是随机评估集。输出目录必须为空。
+准备任务；已有输入可直接复用。所有输出目录须为空：
 
 ```bash
 python scripts/replay_t2.py prepare \
-  --limit 100 \
+  --selection sera/configs/replay/qwen_t2_20.json \
   --out experiments/qwen_t2_inputs
 ```
 
-## 3. 先跑一个任务
+先运行一条，检查 `trajs/` 中的退出状态与工具调用，再显式启动 20 条：
 
 ```bash
-sweagent run-batch \
-  --config "$PWD/sera/configs/sweagent/e2e.yaml" \
-  --config "$PWD/experiments/qwen_t2_inputs/prompt_overrides.yaml" \
-  --instances.type file \
-  --instances.path "$PWD/experiments/qwen_t2_inputs/instances.json" \
-  --instances.slice 1 \
-  --instances.shuffle False \
-  --num_workers 1 \
-  --pipeline False \
-  --pipeline_yaml "$PWD/sera/configs/pipeline/default_pipeline.yaml" \
-  --agent.model.name "openai/$QWEN_MODEL_ID" \
-  --agent.model.api_base "$QWEN_BASE_URL" \
-  --agent.model.api_key '$OPENAI_API_KEY' \
-  --agent.model.temperature 0.6 \
-  --agent.model.per_instance_call_limit 115 \
-  --agent.model.per_instance_cost_limit 0 \
-  --agent.model.total_cost_limit 0 \
-  --agent.model.max_input_tokens 28672 \
-  --agent.model.max_output_tokens 4096 \
-  --agent.model.completion_kwargs '{"max_tokens":4096}' \
-  --output_dir "$PWD/experiments/qwen_t2_raw"
+python scripts/run_qwen_t2.py --upstream "$QWEN_BASE_URL" \
+  --out experiments/qwen_t2_smoke
+
+python scripts/run_qwen_t2.py --upstream "$QWEN_BASE_URL" --all \
+  --out experiments/qwen_t2_run
 ```
 
-检查日志和 `.traj`，确认模型能调用工具。成功后删除 `--instances.slice 1`，将 `--num_workers` 改为 2 或 4，运行全部选中任务。
+`run.json` 保存配置、依赖版本、输入哈希和镜像身份；`api/` 保存每次原始请求、响应和 token ID。`.traj` 中以 `<think>` 标注思考，下一轮还原成原生 reasoning 字段；think 外的普通回答完整保留。不要预先应用参考 patch，也不要对比较轨迹运行训练清洗。
 
-不要预先应用参考 patch。保留原始 `.traj` / `.pred`，直接用于比较。
+阅读原始内容，只展开换行并格式化；输出包含 `.txt`、`.json` 和一个简单选择页：
 
-## 4. 比较结果
+```bash
+python scripts/view_t2.py \
+  --references experiments/qwen_t2_inputs/references.jsonl \
+  --trajs experiments/qwen_t2_run/trajs \
+  --out experiments/qwen_t2_reader.html
+```
+
+只读 GLM 时省略 `--trajs`；需要查看实际 API 全记录时增加 `--api experiments/qwen_t2_run/api`。
 
 ```bash
 python scripts/replay_t2.py compare \
   --references experiments/qwen_t2_inputs/references.jsonl \
-  --trajs experiments/qwen_t2_raw \
+  --trajs experiments/qwen_t2_run/trajs \
   --out experiments/qwen_t2_comparison
 ```
 
-查看输出目录中的 `summary.json`（汇总）和 `pairs.jsonl`（逐任务结果）：提交率、工具调用、轨迹长度及 patch 匹配情况。先确认 `initial_prompt_mismatches` 为空。
-
-- patch recall 衡量修改行的重合度，不能代替功能测试；GLM 参考 patch 也未必正确。
-- 这里的预算不保证与发布轨迹一致；推理长度只统计可见的 `<think>` 文本。
+查看 `summary.json` 和 `pairs.jsonl`，先确认 `initial_prompt_mismatches` 为空。失败和缺失任务保留在统计中；无法识别思考边界时记为未知。Patch 重合度不能代替功能测试，GLM 参考结果也未经过完整验证。

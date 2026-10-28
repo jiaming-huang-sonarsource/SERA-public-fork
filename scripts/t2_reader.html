@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>messages</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:24px; }
+  select { font:inherit; padding:4px; }
+  pre { font:14px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; tab-size:4; }
+</style>
+<select id="trajectory" aria-label="轨迹"></select>
+<pre id="messages">__FIRST_TRAJECTORY__</pre>
+<script id="dataset" type="application/json">__T2_DATA__</script>
+<script>
+  const data = JSON.parse(document.getElementById('dataset').textContent);
+  const select = document.getElementById('trajectory');
+  const output = document.getElementById('messages');
+  data.forEach((row,index) => select.add(new Option(row.id,index)));
+  select.onchange = () => { output.textContent = data[Number(select.value)].text; };
+  output.textContent = data[0].text;
+</script>
+</html>
