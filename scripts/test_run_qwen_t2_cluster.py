@@ -1,7 +1,6 @@
 import io
 import json
 from pathlib import Path
-import subprocess
 import tarfile
 import tempfile
 from types import SimpleNamespace
@@ -76,6 +75,16 @@ class ClusterRunnerTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 runner.extract_results(archive, root / 'out')
             self.assertEqual((root / 'out/result/data').read_bytes(), b'original')
+
+    def test_worker_reports_startup_failure_instead_of_polling_until_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'result').mkdir()
+            with patch.object(runner, 'ROOT', root), patch.object(runner.os, 'setsid', side_effect=OSError('startup failed')):
+                with self.assertRaises(OSError):
+                    runner.worker(runner.UPSTREAM)
+            status = json.loads((root / 'result/worker-status.json').read_text())
+            self.assertEqual(status, {'status': 'failed', 'returncode': 1, 'error': 'startup failed'})
 
     def test_interrupt_stops_inference_collects_records_and_cleans_exact_resource(self):
         events = []

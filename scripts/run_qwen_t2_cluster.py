@@ -220,7 +220,7 @@ def task(cluster, instance, reference, source, out, receipt, upstream, timeout):
                         f'cd {REMOTE}; mkdir result; nohup {command} >result/agent-console.txt 2>&1 </dev/null &')
         state['status'] = 'running'
         save()
-        print(f'{iid}: running; remote log: kubectl --context {CONTEXT} -n {NAMESPACE} exec {pod_name} -- tail -30 {REMOTE}/result/agent-console.txt', flush=True)
+        print(f'{iid}: running; remote log: AWS_PROFILE=codenext-dev AWS_REGION=us-east-1 kubectl --context {CONTEXT} -n {NAMESPACE} exec {pod_name} -- tail -30 {REMOTE}/result/agent-console.txt', flush=True)
         while time.monotonic() < deadline:
             progress = cluster.execute(pod_name, 'python', '-c',
                                        'import json; from pathlib import Path; '
@@ -244,7 +244,10 @@ def task(cluster, instance, reference, source, out, receipt, upstream, timeout):
         try:
             if pod_name:
                 if state['status'] in ('failed', 'interrupted'):
-                    stop_worker(cluster, pod_name)
+                    try:
+                        stop_worker(cluster, pod_name)
+                    except Exception as error:
+                        state['stop_error'] = str(error)
                 archive_path = folder / 'results.tar.gz'
                 with archive_path.open('wb') as stream:
                     cluster.execute(pod_name, 'tar', 'czf', '-', '--ignore-failed-read', '-C', REMOTE, 'result',
@@ -284,13 +287,13 @@ def task(cluster, instance, reference, source, out, receipt, upstream, timeout):
 
 def worker(upstream):
     """Run inside the task's isolated container, never directly on the Mac."""
-    os.setsid()
-    write_json(ROOT / 'worker-pid.json', {'pid': os.getpid()})
-    os.chdir(ROOT)
-    metadata = json.loads((ROOT / 'task.json').read_text())
     out = ROOT / 'result'
     status = {'status': 'failed', 'returncode': 1}
     try:
+        os.setsid()
+        write_json(ROOT / 'worker-pid.json', {'pid': os.getpid()})
+        os.chdir(ROOT)
+        metadata = json.loads((ROOT / 'task.json').read_text())
         settings = json.loads(SETTINGS.read_text())
         if git('-C', 'modules/SERA-SWE-Agent', 'rev-parse', 'HEAD') != settings['sweagent_revision']:
             raise ValueError('Unexpected SERA-SWE-Agent revision')
