@@ -64,6 +64,59 @@ def prepare_image(image, patch, config):
         subprocess.run(['docker', 'rm', '-f', container], check=True, stdout=subprocess.DEVNULL)
 
 
+def run_agent(settings, inputs, out, run_instances, upstream, manifest, local=False):
+    """Use the same model, policy and recorder for Docker and cluster sandboxes."""
+    proxy = Proxy(upstream, out / 'api', context_window=settings['context_window'])
+    authorization = 'Bearer ' + os.environ.get('OPENAI_API_KEY', 'not-needed')
+    status, models = proxy.request('/v1/models', authorization=authorization)
+    model = next((m for m in models.get('data', []) if m['id'] == settings['served_model']), None)
+    if status != 200 or model is None or model.get('max_model_len') != settings['context_window']:
+        raise ValueError('Model ID or context window differs from the fixed config')
+    with proxy.server(port=0) as server:
+        model_config = dict(
+            name='openai/' + settings['served_model'],
+            api_base=f'http://127.0.0.1:{server.server_port}/v1', api_key='$OPENAI_API_KEY',
+            temperature=settings['temperature'], top_p=settings['top_p'],
+            per_instance_call_limit=115, per_instance_cost_limit=0, total_cost_limit=0,
+            max_input_tokens=0, max_output_tokens=settings['max_output_tokens'],
+            completion_kwargs=dict(max_tokens=settings['max_output_tokens'], seed=settings['seed'],
+                                   parallel_tool_calls=False, presence_penalty=0.0,
+                                   extra_body=settings['extra_body']),
+        )
+        config = out / 'model.json'
+        config.write_text(json.dumps({'agent': {'model': model_config}}, indent=2) + '\n')
+        deployment = (['--instances.deployment.type', 'local'] if local else
+                      ['--instances.deployment.platform', 'linux/amd64'])
+        command = [sys.executable, '-m', 'sweagent', 'run-batch',
+                   '--config', str(ROOT / 'sera/configs/sweagent/e2e.yaml'),
+                   '--config', str(inputs / 'prompt_overrides.yaml'), '--config', str(config),
+                   '--instances.type', 'file', '--instances.path', str(run_instances),
+                   '--instances.shuffle', 'False', *deployment, '--num_workers', '1',
+                   '--pipeline', 'False', '--pipeline_yaml', str(ROOT / 'sera/configs/pipeline/default_pipeline.yaml'),
+                   '--output_dir', str(out / 'trajs')]
+        sources = [SETTINGS, SELECTION, ROOT / 'sera/configs/sweagent/e2e.yaml',
+                   ROOT / 'sera/configs/pipeline/default_pipeline.yaml', Path(__file__),
+                   ROOT / 'scripts/qwen_t2_proxy.py', ROOT / 'scripts/t2_image.py',
+                   config, run_instances, *inputs.iterdir()]
+        manifest.update(started_at=datetime.now(timezone.utc).isoformat(), settings=settings,
+                        sweagent_revision=settings['sweagent_revision'], command=command, upstream=upstream,
+                        models=models, hashes={str(p.relative_to(ROOT) if p.is_relative_to(ROOT) else p): sha256(p)
+                                               for p in sources if p.is_file()},
+                        python=sys.version, dependencies={p.metadata['Name']: p.version for p in importlib.metadata.distributions()})
+        receipt = out / 'run.json'
+        receipt.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        env = dict(os.environ, OPENAI_API_KEY=os.environ.get('OPENAI_API_KEY', 'not-needed'))
+        try:
+            result = subprocess.run(command, cwd=ROOT, env=env)
+            manifest['returncode'] = result.returncode
+        finally:
+            server.shutdown()
+            manifest['finished_at'] = datetime.now(timezone.utc).isoformat()
+            receipt.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+        return result.returncode
+
+
 def run(args):
     settings = json.loads(SETTINGS.read_text())
     inputs, out = args.inputs.resolve(), args.out.resolve()
@@ -102,56 +155,9 @@ def run(args):
         images[image]['prepared_image'] = instance['image_name']
     run_instances = out / 'run-instances.json'
     run_instances.write_text(json.dumps(selected, ensure_ascii=False, indent=2) + '\n')
-    proxy = Proxy(args.upstream, out / 'api', context_window=settings['context_window'])
-    authorization = 'Bearer ' + os.environ.get('OPENAI_API_KEY', 'not-needed')
-    status, models = proxy.request('/v1/models', authorization=authorization)
-    model = next((m for m in models.get('data', []) if m['id'] == settings['served_model']), None)
-    if status != 200 or model is None or model.get('max_model_len') != settings['context_window']:
-        raise ValueError('Model ID or context window differs from the fixed config')
-    with proxy.server(port=0) as server:
-        base = f'http://127.0.0.1:{server.server_port}/v1'
-        model_config = dict(
-            name='openai/' + settings['served_model'], api_base=base, api_key='$OPENAI_API_KEY',
-            temperature=settings['temperature'], top_p=settings['top_p'],
-            per_instance_call_limit=115, per_instance_cost_limit=0, total_cost_limit=0,
-            max_input_tokens=0, max_output_tokens=settings['max_output_tokens'],
-            completion_kwargs=dict(max_tokens=settings['max_output_tokens'], seed=settings['seed'],
-                                   parallel_tool_calls=False, presence_penalty=0.0,
-                                   extra_body=settings['extra_body']),
-        )
-        config = out / 'model.json'
-        config.write_text(json.dumps({'agent': {'model': model_config}}, indent=2) + '\n')
-        command = [sys.executable, '-m', 'sweagent', 'run-batch',
-                   '--config', str(ROOT / 'sera/configs/sweagent/e2e.yaml'),
-                   '--config', str(snapshots / 'prompt_overrides.yaml'), '--config', str(config),
-                   '--instances.type', 'file', '--instances.path', str(run_instances),
-                   '--instances.shuffle', 'False',
-                   '--instances.deployment.platform', 'linux/amd64', '--num_workers', '1',
-                   '--pipeline', 'False', '--pipeline_yaml', str(ROOT / 'sera/configs/pipeline/default_pipeline.yaml'),
-                   '--output_dir', str(out / 'trajs')]
-        sources = [SETTINGS, SELECTION, ROOT / 'sera/configs/sweagent/e2e.yaml',
-                   ROOT / 'sera/configs/pipeline/default_pipeline.yaml', Path(__file__),
-                   ROOT / 'scripts/qwen_t2_proxy.py', ROOT / 'scripts/t2_image.py',
-                   config, run_instances, *snapshots.iterdir()]
-        manifest = dict(started_at=datetime.now(timezone.utc).isoformat(), settings=settings,
-                        repository_commit=git('rev-parse', 'HEAD'), repository_status=git('status', '--porcelain'),
-                        sweagent_revision=settings['sweagent_revision'], command=command, upstream=args.upstream,
-                        models=models, image_identities=images,
-                        instance_ids=[i['instance_id'] for i in selected],
-                        hashes={str(p.relative_to(ROOT) if p.is_relative_to(ROOT) else p): sha256(p) for p in sources},
-                        python=sys.version, dependencies={p.metadata['Name']: p.version for p in importlib.metadata.distributions()})
-        receipt = out / 'run.json'
-        receipt.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        env = dict(os.environ, OPENAI_API_KEY=os.environ.get('OPENAI_API_KEY', 'not-needed'))
-        try:
-            result = subprocess.run(command, cwd=ROOT, env=env)
-            manifest['returncode'] = result.returncode
-        finally:
-            server.shutdown()
-            manifest['finished_at'] = datetime.now(timezone.utc).isoformat()
-            receipt.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
-        return result.returncode
+    manifest = dict(repository_commit=git('rev-parse', 'HEAD'), repository_status=git('status', '--porcelain'),
+                    image_identities=images, instance_ids=[i['instance_id'] for i in selected])
+    return run_agent(settings, snapshots, out, run_instances, args.upstream, manifest)
 
 
 def main():
