@@ -158,6 +158,22 @@ if p.exists():
 ''', timeout=30)
 
 
+def poll_worker(cluster, pod, deadline):
+    for attempt in range(6):
+        try:
+            progress = cluster.execute(pod, 'python', '-c',
+                                       'import json; from pathlib import Path; '
+                                       f'p=Path("{REMOTE}/result/worker-status.json"); '
+                                       f'print(p.read_text() if p.exists() else json.dumps({{"status":"running", "api_calls":len(list(Path("{REMOTE}/result/api").glob("*.json")))}}))',
+                                       text=True, stdout=subprocess.PIPE)
+            return json.loads(progress.stdout)
+        except (subprocess.SubprocessError, json.JSONDecodeError):
+            if attempt == 5 or time.monotonic() + 5 >= deadline:
+                raise
+            print(f'{pod}: retrying status query ({attempt + 1}/6); worker continues', flush=True)
+            time.sleep(5)
+
+
 SETUP = '''set -eu
 cd /tmp/sera-t2
 python -m pip install -q uv
@@ -222,12 +238,7 @@ def task(cluster, instance, reference, source, out, receipt, upstream, timeout):
         save()
         print(f'{iid}: running; remote log: AWS_PROFILE=codenext-dev AWS_REGION=us-east-1 kubectl --context {CONTEXT} -n {NAMESPACE} exec {pod_name} -- tail -30 {REMOTE}/result/agent-console.txt', flush=True)
         while time.monotonic() < deadline:
-            progress = cluster.execute(pod_name, 'python', '-c',
-                                       'import json; from pathlib import Path; '
-                                       f'p=Path("{REMOTE}/result/worker-status.json"); '
-                                       f'print(p.read_text() if p.exists() else json.dumps({{"status":"running", "api_calls":len(list(Path("{REMOTE}/result/api").glob("*.json")))}}))',
-                                       text=True, stdout=subprocess.PIPE)
-            result = json.loads(progress.stdout)
+            result = poll_worker(cluster, pod_name, deadline)
             if result['status'] != 'running':
                 state.update(result)
                 break

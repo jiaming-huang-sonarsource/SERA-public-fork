@@ -1,6 +1,7 @@
 import io
 import json
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 from types import SimpleNamespace
@@ -22,6 +23,24 @@ def archive_bytes(entries):
 
 
 class ClusterRunnerTests(unittest.TestCase):
+    def test_transient_status_failure_does_not_stop_detached_worker(self):
+        for failure in [subprocess.CalledProcessError(1, ['kubectl']), SimpleNamespace(stdout='')]:
+            with self.subTest(failure=failure):
+                cluster = Mock()
+                cluster.execute.side_effect = [failure, SimpleNamespace(stdout='{"status":"running","api_calls":3}')]
+                with patch.object(runner.time, 'sleep') as sleep:
+                    result = runner.poll_worker(cluster, 'our-pod', runner.time.monotonic() + 60)
+                self.assertEqual(result, {'status': 'running', 'api_calls': 3})
+                self.assertEqual(cluster.execute.call_count, 2)
+                sleep.assert_called_once_with(5)
+
+    def test_persistent_status_failure_is_bounded(self):
+        cluster = Mock()
+        cluster.execute.side_effect = subprocess.CalledProcessError(1, ['kubectl'])
+        with patch.object(runner.time, 'sleep'), self.assertRaises(subprocess.CalledProcessError):
+            runner.poll_worker(cluster, 'our-pod', runner.time.monotonic() + 60)
+        self.assertEqual(cluster.execute.call_count, 6)
+
     def test_kubectl_always_uses_explicit_context_and_aws_profile(self):
         with patch.object(runner.subprocess, 'run', return_value=SimpleNamespace(stdout='{}')) as run:
             runner.Cluster().call('get', 'pods')
