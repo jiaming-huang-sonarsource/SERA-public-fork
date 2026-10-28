@@ -47,6 +47,20 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(proxy.complete({"stream": True})[0], 400)
             self.assertEqual(len(list(Path(tmp).glob("*.json"))), 2)
 
+    def test_forwarded_request_is_on_disk_before_generation_returns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proxy = Proxy("http://localhost:8000/v1", tmp)
+            def request(*args):
+                record = json.loads(next(Path(tmp).glob('*.json')).read_text())
+                self.assertEqual(record['status'], 'in_flight')
+                self.assertEqual(record['request']['messages'], [])
+                raise TimeoutError('interrupted upstream')
+            proxy.request = request
+            self.assertEqual(proxy.complete({'messages': []})[0], 502)
+            record = json.loads(next(Path(tmp).glob('*.json')).read_text())
+            self.assertEqual(record['status'], 502)
+            self.assertIn('interrupted upstream', record['error'])
+
     def test_history_roundtrip_preserves_thinking_commentary_and_tools(self):
         response = self.response()
         message = agent_response(response)["choices"][0]["message"]

@@ -78,13 +78,23 @@ class Proxy:
             return error.code, json.loads(error.read())
 
     def complete(self, payload, authorization=None):
-        record = {"started_at": datetime.now(timezone.utc).isoformat(), "agent_request": payload}
+        record = {"started_at": datetime.now(timezone.utc).isoformat(), "agent_request": payload,
+                  "status": "in_flight"}
+        path = self.records / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex + ".json")
+
+        def save():
+            temporary = path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+            temporary.replace(path)
+
+        save()
         started = time.monotonic()
         status, response = 502, {"error": {"message": "Upstream request failed"}}
         try:
             if payload.get("stream"):
                 raise ValueError("This SERA recorder accepts non-streaming requests only")
             record["request"] = upstream_request(payload)
+            save()
             if self.context_window is not None:
                 request = record["request"]
                 output_tokens = request.get("max_tokens")
@@ -98,28 +108,27 @@ class Proxy:
                 status, tokens = self.request("/tokenize", tokenize, authorization)
                 record["tokenization"] = tokens
                 if status != 200:
-                    record["response"] = tokens
+                    response = record["response"] = tokens
                     return status, tokens
                 if tokens["max_model_len"] != self.context_window:
                     raise ValueError("Serving context differs from the fixed experiment config")
                 if tokens["count"] + output_tokens > self.context_window:
                     raise ValueError("Input plus output reserve is longer than the model's context length")
                 request["return_token_ids"] = True
+                save()
             status = 502
             status, response = self.request("/v1/chat/completions", record["request"], authorization)
             record["response"] = response
             if status == 200:
                 response = agent_response(response)
-            record["agent_response"] = response
         except ValueError as error:
             status, response = 400, {"error": {"message": str(error)}}
         except (URLError, TimeoutError, OSError) as error:
             record["error"] = str(error)
         finally:
+            record['agent_response'] = response
             record.update(status=status, seconds=round(time.monotonic() - started, 6))
-            # Each request, including failed/retried calls, gets its own complete record.
-            path = self.records / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex + ".json")
-            path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+            save()
         return status, response
 
     def server(self, host="127.0.0.1", port=18001):

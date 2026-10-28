@@ -262,9 +262,9 @@ def compare(args):
         "qwen_exact_glm_patch_rate": sum(p["qwen"]["exact_glm_patch"] for p in present) / len(pairs),
     }
     for model in ("glm", "qwen"):
-        records = [p[model] for p in present]  # Same paired IDs for both models.
         summary[model + "_paired_means"] = {
-            key: mean(values) if (values := [r[key] for r in records if r[key] is not None]) else None
+            key: mean(values) if (values := [p[model][key] for p in present
+                                            if all(p[m][key] is not None for m in ('glm', 'qwen'))]) else None
             for key in ("assistant_turns", "tool_calls", "assistant_chars", "visible_think_chars", "target_line_recall")
         }
         for threshold in (0.5, 1.0):
