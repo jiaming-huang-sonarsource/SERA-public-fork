@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from t2_image import git, patch_files, restore
+from t2_image import git, patch_files, preimage_from_hunks, restore
 
 
 class InitialStateTests(unittest.TestCase):
@@ -35,14 +35,21 @@ class InitialStateTests(unittest.TestCase):
     def test_unmatched_image_fails_without_modifying_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            patch = self.setup_repo(root)
-            (root / 'code.py').write_text('unrelated\n')
+            self.setup_repo(root)
+            original = ''.join(f'line {i}\n' for i in range(20))
+            (root / 'code.py').write_text(original)
+            git(root, 'commit', '-qam', 'long original')
+            changed = original.replace('line 10\n', 'changed\n')
+            (root / 'code.py').write_text(changed)
+            patch = subprocess.check_output(['git', '-C', str(root), 'diff'], text=True)
+            unrelated = changed.replace('line 0\n', 'unknown outside patch\n')
+            (root / 'code.py').write_text(unrelated)
             git(root, 'commit', '-qam', 'unrelated')
             before = git(root, 'rev-parse', 'HEAD')
             with self.assertRaisesRegex(ValueError, 'neither'):
                 restore(root, patch)
             self.assertEqual(git(root, 'rev-parse', 'HEAD'), before)
-            self.assertEqual((root / 'code.py').read_text(), 'unrelated\n')
+            self.assertEqual((root / 'code.py').read_text(), unrelated)
         with self.assertRaises(ValueError):
             patch_files('diff --git a/../escape b/../escape\nindex 111..222\n')
 
@@ -62,6 +69,26 @@ class InitialStateTests(unittest.TestCase):
             self.assertEqual((root / 'second.py').read_text(), 'second original\n')
             self.assertEqual(git(root, 'rev-list', '--count', 'HEAD'), '1')
             self.assertEqual(git(root, 'status', '--porcelain'), '')
+
+    def test_partial_hunks_recover_only_when_whole_file_hash_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.setup_repo(root)
+            original = ''.join(f'line {i}\n' for i in range(30))
+            (root / 'code.py').write_text(original)
+            git(root, 'commit', '-qam', 'long original')
+            (root / 'code.py').write_text(original.replace('line 3\n', 'first change\n').replace('line 25\n', 'second change\n'))
+            patch = subprocess.check_output(['git', '-C', str(root), 'diff'], text=True)
+            (root / 'code.py').write_text(original.replace('line 3\n', 'first change\n'))
+            git(root, 'commit', '-qam', 'partial image')
+            identity = restore(root, patch)
+            self.assertEqual((root / 'code.py').read_text(), original)
+            self.assertEqual(identity['preimages_recovered_from_hunks'], ['code.py'])
+            self.assertEqual(git(root, 'rev-list', '--count', 'HEAD'), '1')
+
+    def test_hunk_recovery_rejects_incomplete_or_wrong_hash_evidence(self):
+        self.assertIsNone(preimage_from_hunks('source\n', 'diff --git a/a b/a\n@@ -1,2 +1 @@\n-source\n+new\n', 'a', 'abc'))
+        self.assertIsNone(preimage_from_hunks('source\n', '', 'a', 'abc'))
 
 
 if __name__ == '__main__':

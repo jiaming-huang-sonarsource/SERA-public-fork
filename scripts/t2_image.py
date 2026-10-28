@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify published patch preimages and restore them in a disposable task image."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,49 @@ def patch_files(patch):
     return files
 
 
+def preimage_from_hunks(source, patch, path, expected):
+    """Recover known old lines, accepting only the published whole-file blob."""
+    hunks, old_lines, start, count = [], None, None, None
+    selected, previous_old = False, False
+    for line in patch.splitlines(keepends=True):
+        if line.startswith('diff --git ') or line.startswith('@@ '):
+            if old_lines is not None:
+                if len(old_lines) != count:
+                    return None
+                hunks.append((start, count, old_lines))
+                old_lines = None
+        if line.startswith('diff --git '):
+            selected = line.rstrip('\n') == f'diff --git a/{path} b/{path}'
+        elif selected and line.startswith('@@ '):
+            match = re.match(r'@@ -(\d+)(?:,(\d+))? \+', line)
+            if not match:
+                return None
+            start, count = int(match[1]) - 1, int(match[2] or 1)
+            old_lines = []
+        elif old_lines is not None:
+            if line.startswith((' ', '-')):
+                old_lines.append(line[1:])
+                previous_old = True
+            elif line.startswith('+'):
+                previous_old = False
+            elif line.startswith('\\ No newline') and old_lines and previous_old:
+                old_lines[-1] = old_lines[-1].removesuffix('\n')
+    if old_lines is not None:
+        if len(old_lines) != count:
+            return None
+        hunks.append((start, count, old_lines))
+    if not hunks:
+        return None
+    lines = source.splitlines(keepends=True)
+    for start, count, old_lines in reversed(hunks):
+        if start < 0 or start + count > len(lines):
+            return None
+        lines[start:start + count] = old_lines
+    candidate = ''.join(lines).encode()
+    digest = hashlib.sha1(b'blob ' + str(len(candidate)).encode() + b'\0' + candidate).hexdigest()
+    return candidate if digest.startswith(expected) else None
+
+
 def restore(root, patch):
     root = Path(root)
     if not (root / '.git').is_dir() or (root / '.git').is_symlink():
@@ -46,20 +90,29 @@ def restore(root, patch):
 
     # A published patch may touch several files, while the image contains only
     # some postimages. Validate every file before reversing just those changes.
-    postimages = []
+    postimages, recovered = [], {}
     for path, old, new in files:
         actual = blob(path)
         if actual.startswith(old):
             continue
         if not actual.startswith(new):
-            raise ValueError('Image source matches neither published preimage nor postimage')
-        postimages.append(path)
+            candidate = None
+            if (root / path).is_file():
+                candidate = preimage_from_hunks((root / path).read_text(), patch, path, old)
+            if candidate is None:
+                raise ValueError('Image source matches neither published preimage nor postimage')
+            recovered[path] = candidate
+        else:
+            postimages.append(path)
 
     restored = False
-    if postimages:
+    if postimages or recovered:
         command = ['git', '-C', str(root), 'apply', '--reverse', *['--include=' + path for path in postimages]]
-        subprocess.run([*command, '--check', '-'], input=patch, text=True, check=True)
-        subprocess.run([*command, '-'], input=patch, text=True, check=True)
+        if postimages:
+            subprocess.run([*command, '--check', '-'], input=patch, text=True, check=True)
+            subprocess.run([*command, '-'], input=patch, text=True, check=True)
+        for path, data in recovered.items():
+            (root / path).write_bytes(data)
         if not all(blob(path).startswith(old) for path, old, new in files):
             raise ValueError('Restored source does not match published preimage blobs')
         # Keep the solution and restoration diff out of the agent's Git history.
@@ -74,7 +127,8 @@ def restore(root, patch):
         git(root, 'remote', 'add', 'origin', str(root))
         restored = True
     return dict(original_head=original_head, base_commit=git(root, 'rev-parse', 'HEAD'),
-                restored_preimage=restored, verified_preimage_blobs={p: old for p, old, new in files})
+                restored_preimage=restored, verified_preimage_blobs={p: old for p, old, new in files},
+                preimages_recovered_from_hunks=list(recovered))
 
 
 if __name__ == '__main__':
