@@ -35,6 +35,8 @@ python3 scripts/run_qwen_t2_cluster.py --all \
 
 输出目录中的 `reader.html` 按同一任务左右并排展示 SERA/GLM 与 Qwen，左右独立滚动；`reader/*.txt` 可直接阅读。两侧均为完整原始历史，仅格式化换行。`trajs/` 保存 `.traj` 和提交结果，`api/` 保存每次实际请求、原始响应及 token ID；`run.json`、`tasks/` 保存环境身份和运行日志。思考与普通回答均保留；不要对比较轨迹运行训练清洗。
 
+页首统计轮数、SERA 清洗后的训练长度、工具调用/返回均长与 patch 增删行数；点击“统计规则”查看口径。token 默认估算；生成网页时传 `--tokenizer /path/to/tokenizer.json` 可精确计数（需安装 `tokenizers`，两侧统一使用 Qwen3 训练 tokenizer）。
+
 只读已发布的 GLM 历史：
 
 ```bash

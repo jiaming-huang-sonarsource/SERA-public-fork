@@ -66,11 +66,36 @@ class ReaderTests(unittest.TestCase):
             embedded = json.loads(re.search(r'<script id="dataset" type="application/json">(.*?)</script>', page, re.S)[1])
             self.assertEqual([row['id'] for row in embedded], ['example_1', 'example_2'])
             self.assertIsNone(embedded[0]['qwen_text'])
+            self.assertIsNone(embedded[0]['qwen_stats'])
+            self.assertEqual(embedded[1]['qwen_stats']['turns'], 1)
+            self.assertEqual(embedded[1]['qwen_stats']['tool_calls'], 1)
+            self.assertIsNotNone(embedded[1]['qwen_stats']['filtered_tokens'])
             self.assertEqual(embedded[1]['text'], readable(json.loads(rows[1]['messages'])) + '\n')
             self.assertEqual(embedded[1]['qwen_text'], readable(history) + '\n')
             self.assertEqual(json.loads((root / 'reader/example_2.qwen.json').read_text()), history)
             self.assertIn('尚无这条任务的 Qwen 轨迹。', page)
             self.assertNotIn('__FIRST_QWEN__', page)
+            self.assertNotIn('__TOKENIZER__', page)
+
+    def test_final_patch_and_submission_status_are_paired_without_changing_exports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            row = self.reference()
+            row['rollout_patch'] = 'diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n'
+            refs = root / 'references.jsonl'
+            refs.write_text(json.dumps(row))
+            path = root / 'trajs/example_1/example_1.traj'
+            path.parent.mkdir(parents=True)
+            history = json.loads(row['messages'])
+            path.write_text(json.dumps({'history': history, 'info': {'exit_status': 'cost_limit', 'submission': 'stale'}}))
+            path.with_suffix('.pred').write_text(json.dumps({'model_patch': ''}))
+            page = build_reader(refs, root / 'reader.html', root / 'trajs').read_text()
+            pair = json.loads(re.search(r'<script id="dataset" type="application/json">(.*?)</script>', page, re.S)[1])[0]
+            self.assertEqual(pair['stats']['patch'], {'added': 1, 'deleted': 1, 'total': 2})
+            self.assertEqual(pair['qwen_stats']['patch']['total'], 0)
+            self.assertIsNone(pair['qwen_stats']['filtered_tokens'])
+            self.assertIn('未提交', pair['qwen_stats']['filter_error'])
+            self.assertEqual(json.loads((root / 'reader/example_1.qwen.json').read_text()), history)
 
     def test_no_global_backslash_replacement(self):
         self.assertEqual(readable('actual\nnewline'), 'actual\nnewline')
