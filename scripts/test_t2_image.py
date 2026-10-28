@@ -46,6 +46,23 @@ class InitialStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             patch_files('diff --git a/../escape b/../escape\nindex 111..222\n')
 
+    def test_mixed_preimages_and_postimages_restore_only_modified_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_patch = self.setup_repo(root)
+            (root / 'second.py').write_text('second original\n')
+            git(root, 'add', '.')
+            git(root, 'commit', '-qm', 'second original')
+            (root / 'second.py').write_text('second changed\n')
+            second_patch = subprocess.check_output(['git', '-C', str(root), 'diff'], text=True)
+            git(root, 'checkout', '--', 'second.py')
+            identity = restore(root, first_patch + second_patch)
+            self.assertTrue(identity['restored_preimage'])
+            self.assertEqual((root / 'code.py').read_text(), 'original\n')
+            self.assertEqual((root / 'second.py').read_text(), 'second original\n')
+            self.assertEqual(git(root, 'rev-list', '--count', 'HEAD'), '1')
+            self.assertEqual(git(root, 'status', '--porcelain'), '')
+
 
 if __name__ == '__main__':
     unittest.main()

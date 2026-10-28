@@ -41,22 +41,26 @@ def restore(root, patch):
         raise ValueError('Task image must start with a clean worktree')
     original_head = git(root, 'rev-parse', 'HEAD')
 
-    def matches(column):
-        for path, old, new in files:
-            expected = (old, new)[column]
-            file = root / path
-            actual = git(root, 'hash-object', '--', path) if file.is_file() else '0' * 40
-            if not actual.startswith(expected):
-                return False
-        return True
+    def blob(path):
+        return git(root, 'hash-object', '--', path) if (root / path).is_file() else '0' * 40
+
+    # A published patch may touch several files, while the image contains only
+    # some postimages. Validate every file before reversing just those changes.
+    postimages = []
+    for path, old, new in files:
+        actual = blob(path)
+        if actual.startswith(old):
+            continue
+        if not actual.startswith(new):
+            raise ValueError('Image source matches neither published preimage nor postimage')
+        postimages.append(path)
 
     restored = False
-    if not matches(0):
-        if not matches(1):
-            raise ValueError('Image source matches neither published preimage nor postimage')
-        subprocess.run(['git', '-C', str(root), 'apply', '--reverse', '--check', '-'], input=patch, text=True, check=True)
-        subprocess.run(['git', '-C', str(root), 'apply', '--reverse', '-'], input=patch, text=True, check=True)
-        if not matches(0):
+    if postimages:
+        command = ['git', '-C', str(root), 'apply', '--reverse', *['--include=' + path for path in postimages]]
+        subprocess.run([*command, '--check', '-'], input=patch, text=True, check=True)
+        subprocess.run([*command, '-'], input=patch, text=True, check=True)
+        if not all(blob(path).startswith(old) for path, old, new in files):
             raise ValueError('Restored source does not match published preimage blobs')
         # Keep the solution and restoration diff out of the agent's Git history.
         shutil.rmtree(root / '.git')
