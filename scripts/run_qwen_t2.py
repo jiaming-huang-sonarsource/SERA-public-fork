@@ -41,7 +41,7 @@ def validate_inputs(inputs):
     return instances
 
 
-def prepare_image(image, patch):
+def prepare_image(image, patch, config):
     """Restore verified task preimages before the agent sees the container."""
     container = 'sera-t2-input-' + uuid4().hex
     bootstrap = (ROOT / 'scripts/t2_image.py').read_text()
@@ -52,7 +52,13 @@ def prepare_image(image, patch):
             input=json.dumps({'target_patch': patch}), text=True)
         identity = json.loads(result)
         if identity['restored_preimage']:
-            image = subprocess.check_output(['docker', 'commit', container], text=True).strip()
+            # SWE-ReX uses this local name as FROM when adding standalone Python.
+            image = 'sera-t2-initial:' + uuid4().hex
+            identity['prepared_image_id'] = subprocess.check_output(
+                ['docker', 'commit',
+                 '--change', 'ENTRYPOINT ' + json.dumps(config.get('Entrypoint') or []),
+                 '--change', 'CMD ' + json.dumps(config.get('Cmd') or []),
+                 container, image], text=True).strip()
         return image, identity
     finally:
         subprocess.run(['docker', 'rm', '-f', container], check=True, stdout=subprocess.DEVNULL)
@@ -90,7 +96,7 @@ def run(args):
         if not info.get('RepoDigests'):
             raise ValueError(f'No immutable digest for task image: {image}')
         instance['image_name'], baseline = prepare_image(
-            info['RepoDigests'][0], references[instance['instance_id']]['target_patch'])
+            info['RepoDigests'][0], references[instance['instance_id']]['target_patch'], info['Config'])
         instance['base_commit'] = baseline['base_commit']
         images[image]['initial_state'] = baseline
         images[image]['prepared_image'] = instance['image_name']
