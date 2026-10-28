@@ -81,8 +81,9 @@ def restore(root, patch):
     if not (root / '.git').is_dir() or (root / '.git').is_symlink():
         raise ValueError('Expected an isolated task image with a Git directory')
     files = patch_files(patch)
-    if git(root, 'status', '--porcelain'):
+    if git(root, 'status', '--porcelain', '--untracked-files=no'):
         raise ValueError('Task image must start with a clean worktree')
+    tracked = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z'])
     original_head = git(root, 'rev-parse', 'HEAD')
 
     def blob(path):
@@ -119,7 +120,11 @@ def restore(root, patch):
         shutil.rmtree(root / '.git')
         git(root, 'init', '-q')
         git(root, 'symbolic-ref', 'HEAD', 'refs/heads/sera-t2')
-        git(root, 'add', '-A')
+        # Preserve image-provided installation metadata as untracked files.
+        paths = set(tracked.split(b'\0')) | {os.fsencode(p) for p, old, new in files if int(old, 16)}
+        baseline = b''.join(p + b'\0' for p in sorted(paths) if p and os.path.lexists(root / os.fsdecode(p)))
+        subprocess.run(['git', '-C', str(root), 'add', '-f', '--pathspec-from-file=-', '--pathspec-file-nul'],
+                       input=baseline, check=True)
         git(root, '-c', 'user.name=SERA replay', '-c', 'user.email=replay@localhost',
             'commit', '-qm', 'Published T2 initial state',
             env=dict(os.environ, GIT_AUTHOR_DATE='2000-01-01T00:00:00+00:00',

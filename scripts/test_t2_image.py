@@ -90,6 +90,19 @@ class InitialStateTests(unittest.TestCase):
         self.assertIsNone(preimage_from_hunks('source\n', 'diff --git a/a b/a\n@@ -1,2 +1 @@\n-source\n+new\n', 'a', 'abc'))
         self.assertIsNone(preimage_from_hunks('source\n', '', 'a', 'abc'))
 
+    def test_restoration_preserves_untracked_installation_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            patch = self.setup_repo(root)
+            metadata = root / 'code.egg-info' / 'PKG-INFO'
+            metadata.parent.mkdir()
+            metadata.write_text('Name: code\n')
+            restore(root, patch)
+            self.assertEqual((root / 'code.py').read_text(), 'original\n')
+            self.assertEqual(metadata.read_text(), 'Name: code\n')
+            self.assertEqual(git(root, 'status', '--porcelain'), '?? code.egg-info/')
+            self.assertNotIn('egg-info', git(root, 'ls-tree', '-r', '--name-only', 'HEAD'))
+
 
 if __name__ == '__main__':
     unittest.main()
