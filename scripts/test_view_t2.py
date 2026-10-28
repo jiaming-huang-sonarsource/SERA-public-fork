@@ -49,6 +49,29 @@ class ReaderTests(unittest.TestCase):
             self.assertEqual([t['id'] for t in tasks], ['example_1', 'example_1.qwen', 'example_2'])
             self.assertEqual(tasks[1]['messages'], history)
 
+    def test_side_by_side_pairs_by_id_and_keeps_both_histories_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            refs = root / 'references.jsonl'
+            rows = [self.reference(f'example_{i}') for i in (1, 2)]
+            refs.write_text('\n'.join(json.dumps(row) for row in rows))
+            history = [{'role': 'assistant', 'content': '<think>reason\nfully</think>ordinary answer',
+                        'thought': 'original auxiliary field',
+                        'tool_calls': [{'id': 'call_q', 'function': {'name': 'bash', 'arguments': '{"command":"pwd"}'}}]},
+                       {'role': 'tool', 'content': '</script><script>untrusted</script>'}]
+            traj = root / 'raw/example_2/example_2.traj'
+            traj.parent.mkdir(parents=True)
+            traj.write_text(json.dumps({'history': history}))
+            page = build_reader(refs, root / 'reader.html', root / 'raw').read_text()
+            embedded = json.loads(re.search(r'<script id="dataset" type="application/json">(.*?)</script>', page, re.S)[1])
+            self.assertEqual([row['id'] for row in embedded], ['example_1', 'example_2'])
+            self.assertIsNone(embedded[0]['qwen_text'])
+            self.assertEqual(embedded[1]['text'], readable(json.loads(rows[1]['messages'])) + '\n')
+            self.assertEqual(embedded[1]['qwen_text'], readable(history) + '\n')
+            self.assertEqual(json.loads((root / 'reader/example_2.qwen.json').read_text()), history)
+            self.assertIn('尚无这条任务的 Qwen 轨迹。', page)
+            self.assertNotIn('__FIRST_QWEN__', page)
+
     def test_no_global_backslash_replacement(self):
         self.assertEqual(readable('actual\nnewline'), 'actual\nnewline')
         self.assertEqual(readable('literal \\n'), 'literal \\n')

@@ -51,15 +51,15 @@ def load_tasks(references, trajs=None, api=None):
             raise ValueError(f'Invalid or duplicate instance ID: {iid}')
         seen.add(iid)
         messages = json.loads(row['messages']) if isinstance(row['messages'], str) else row['messages']
-        tasks.append({'id': iid, 'messages': messages})
+        tasks.append({'id': iid, 'source': 'sera', 'messages': messages})
         if trajs:
             path = Path(trajs) / iid / f'{iid}.traj'
             if path.exists():
-                tasks.append({'id': iid + '.qwen', 'messages': json.loads(path.read_text())['history']})
+                tasks.append({'id': iid + '.qwen', 'source': 'qwen', 'messages': json.loads(path.read_text())['history']})
     if api:
         for path in sorted(Path(api).glob('*.json')):
             # Full wire records, including failures and token IDs, remain untouched.
-            tasks.append({'id': 'api.' + path.stem, 'messages': json.loads(path.read_text())})
+            tasks.append({'id': 'api.' + path.stem, 'source': 'api', 'messages': json.loads(path.read_text())})
     if not tasks:
         raise ValueError('Reference file is empty')
     return tasks
@@ -76,12 +76,17 @@ def build_reader(references, out, trajs=None, api=None):
         (exports / (task['id'] + '.json')).write_text(json.dumps(messages, ensure_ascii=False, indent=2) + '\n')
         task['text'] = readable(messages) + '\n'
         (exports / (task['id'] + '.txt')).write_text(task['text'])
-    data = json.dumps(tasks, ensure_ascii=False).replace('<', '\\u003c')
+    # Pair by instance ID, keeping every original field and each model's ordering.
+    by_id = {task['id']: task for task in tasks}
+    pairs = [dict(task, qwen_text=by_id.get(task['id'] + '.qwen', {}).get('text'))
+             for task in tasks if task['source'] != 'qwen']
+    data = json.dumps(pairs, ensure_ascii=False).replace('<', '\\u003c')
     template = Path(__file__).with_name('t2_reader.html').read_text()
     assert template.count('__T2_DATA__') == 1
-    # The first trajectory is also present without JavaScript.
-    replacements = {'__T2_DATA__': data, '__FIRST_TRAJECTORY__': html.escape(tasks[0]['text'])}
-    page = re.sub(r'__T2_DATA__|__FIRST_TRAJECTORY__', lambda match: replacements[match[0]], template)
+    # The first pair is also present without JavaScript.
+    replacements = {'__T2_DATA__': data, '__FIRST_TRAJECTORY__': html.escape(pairs[0]['text']),
+                    '__FIRST_QWEN__': html.escape(pairs[0]['qwen_text'] or '尚无这条任务的 Qwen 轨迹。')}
+    page = re.sub(r'__T2_DATA__|__FIRST_TRAJECTORY__|__FIRST_QWEN__', lambda match: replacements[match[0]], template)
     out.write_text(page)
     return out
 

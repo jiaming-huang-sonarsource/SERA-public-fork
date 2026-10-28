@@ -2,22 +2,48 @@
 <html lang="zh-CN">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>messages</title>
+<title>SERA / Qwen 原始轨迹对比</title>
 <style>
   :root { color-scheme: light dark; }
-  body { margin:24px; }
-  select { font:inherit; padding:4px; }
-  pre { font:14px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; tab-size:4; }
+  * { box-sizing:border-box; }
+  body { margin:0; height:100vh; height:100dvh; display:flex; flex-direction:column; font-family:system-ui,sans-serif; }
+  header { padding:10px 16px; border-bottom:1px solid #8886; }
+  select { font:inherit; padding:4px; max-width:100%; }
+  main { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+  section { min-width:0; min-height:0; display:flex; flex-direction:column; }
+  section + section { border-left:1px solid #8886; }
+  h2 { margin:0; padding:8px 16px; font-size:14px; font-weight:600; border-bottom:1px solid #8886; }
+  pre { flex:1; min-height:0; margin:0; padding:12px 16px; overflow:auto; font:13px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; tab-size:4; }
+  main.api { grid-template-columns:minmax(0,1fr); }
+  main.api #qwen-pane { display:none; }
 </style>
-<select id="trajectory" aria-label="轨迹"></select>
-<pre id="messages">__FIRST_TRAJECTORY__</pre>
+<header><select id="trajectory" aria-label="任务"></select></header>
+<main id="comparison">
+  <section aria-labelledby="sera-label">
+    <h2 id="sera-label">SERA（已发布 GLM-4.6）</h2>
+    <pre id="messages" tabindex="0">__FIRST_TRAJECTORY__</pre>
+  </section>
+  <section id="qwen-pane" aria-labelledby="qwen-label">
+    <h2 id="qwen-label">Qwen3.8-27B</h2>
+    <pre id="qwen-messages" tabindex="0">__FIRST_QWEN__</pre>
+  </section>
+</main>
 <script id="dataset" type="application/json">__T2_DATA__</script>
 <script>
   const data = JSON.parse(document.getElementById('dataset').textContent);
   const select = document.getElementById('trajectory');
   const output = document.getElementById('messages');
+  const qwen = document.getElementById('qwen-messages');
   data.forEach((row,index) => select.add(new Option(row.id,index)));
-  select.onchange = () => { output.textContent = data[Number(select.value)].text; };
-  output.textContent = data[0].text;
+  function render() {
+    const row = data[Number(select.value)];
+    document.getElementById('comparison').classList.toggle('api', row.source === 'api');
+    document.getElementById('sera-label').textContent = row.source === 'api' ? 'API 原始记录' : 'SERA（已发布 GLM-4.6）';
+    output.textContent = row.text;
+    qwen.textContent = row.qwen_text ?? '尚无这条任务的 Qwen 轨迹。';
+    output.scrollTop = qwen.scrollTop = 0;
+  }
+  select.onchange = render;
+  render();
 </script>
 </html>
