@@ -44,6 +44,7 @@
   <section id="qwen-pane" aria-labelledby="qwen-label">
     <h2 id="qwen-label">Qwen3.8-27B</h2>
     <div id="qwen-stats" class="stats" aria-label="Qwen 统计" hidden></div>
+    <div id="qwen-note" class="stats" role="note" hidden></div>
     <pre id="qwen-messages" tabindex="0">__FIRST_QWEN__</pre>
   </section>
 </main>
@@ -84,6 +85,9 @@
     document.getElementById('sera-label').textContent = row.source === 'api' ? 'API 原始记录' : 'SERA（已发布 GLM-4.6）';
     output.textContent = row.text;
     qwen.textContent = row.qwen_text ?? '尚无这条任务的 Qwen 轨迹。';
+    const note = document.getElementById('qwen-note');
+    note.textContent = row.qwen_note ?? '';
+    note.hidden = !row.qwen_note;
     renderStats('sera-stats', row.stats);
     renderStats('qwen-stats', row.qwen_stats);
     output.scrollTop = qwen.scrollTop = 0;

@@ -64,8 +64,10 @@ def load_tasks(references, trajs=None, api=None):
                 pred = json.loads(pred_path.read_text()) if pred_path.exists() else combined.get(iid, {})
                 info = traj.get('info', {})
                 status = info.get('exit_status')
+                note = path.with_suffix('.note.txt')
                 tasks.append({'id': iid + '.qwen', 'source': 'qwen', 'messages': traj['history'],
                               'patch': pred.get('model_patch', info.get('submission')),
+                              'note': note.read_text().strip() if note.exists() else None,
                               'submitted': str(status).lower() == 'submitted' if status is not None else None})
     if api:
         for path in sorted(Path(api).glob('*.json')):
@@ -93,7 +95,8 @@ def build_reader(references, out, trajs=None, api=None, tokenizer=None):
     # Pair by instance ID, keeping every original field and each model's ordering.
     by_id = {task['id']: task for task in tasks}
     pairs = [dict(task, qwen_text=by_id.get(task['id'] + '.qwen', {}).get('text'),
-                  qwen_stats=by_id.get(task['id'] + '.qwen', {}).get('stats'))
+                  qwen_stats=by_id.get(task['id'] + '.qwen', {}).get('stats'),
+                  qwen_note=by_id.get(task['id'] + '.qwen', {}).get('note'))
              for task in tasks if task['source'] != 'qwen']
     data = json.dumps(pairs, ensure_ascii=False).replace('<', '\\u003c')
     template = Path(__file__).with_name('t2_reader.html').read_text()
