@@ -1,20 +1,20 @@
-# 用自托管 Qwen 重跑 SERA T2，并与已发布 GLM 轨迹配对比较
+# Replay SERA T2 with self-hosted Qwen and compare against published GLM trajectories
 
-推荐重跑已发布数据中的同一批 T2 任务。这样固定任务、初始代码、工具和提示词，比较模型生成的轨迹。重新跑完整 SVG pipeline 会产生新的 T1 修改和 PR 描述，适合研究数据生成分布，但不能把差异仅归因于 T2 solver。
+Replay the same T2 tasks from the published dataset. This holds the tasks, initial code, tools, and prompts fixed while comparing model-generated trajectories. Rerunning the full SVG pipeline produces new T1 changes and PR descriptions, which is useful for studying the data-generation distribution, but the resulting differences cannot be attributed solely to the T2 solver.
 
-## 已核对的信息
+## Verified information
 
-- [数据集](https://huggingface.co/datasets/allenai/Sera-4.6-Lite-T2)：36,083 条 T2；数据卡称来自 121 个 SWE-smith codebases，teacher 为 GLM-4.6。不是 SWE-bench Lite 的仓库子集。
-- 固定版本：`d7d753f319f688797b8183c6668b17670992bdeb`；单个 JSONL 约 9.81 GB，脚本默认流式读取前 100 条，不下载整个文件。
-- 字段：`messages`、`instance_id`、`rollout_patch`、`func_name`、`func_path`、`problem_statement`、`target_patch`、`docker_image`。`messages` 必须再 `json.loads()` 一次，已抽查样本包含原始 SWE-agent history 和结构化 `tool_calls`。
-- `target_patch` 是 T1 的参考修改；`rollout_patch` 是 GLM 在 T2 的修改。它们不是经过独立测试确认的正确答案。数据卡明确说主要实验没有做 patch verification。
-- 当前 SERA checkout：`1ca8673bd527b164dc9eb89841c96416ec8ce1a7`；SWE-agent submodule 固定于 `a593220bfdf9e07f7761179977b8ddf02fa981d5`。
+- [Dataset](https://huggingface.co/datasets/allenai/Sera-4.6-Lite-T2): 36,083 T2 records. The dataset card reports 121 SWE-smith codebases and GLM-4.6 as the teacher. This is not a subset of the SWE-bench Lite repositories.
+- Pinned revision: `d7d753f319f688797b8183c6668b17670992bdeb`. The single JSONL file is approximately 9.81 GB; by default, the script streams the first 100 records without downloading the entire file.
+- Fields: `messages`, `instance_id`, `rollout_patch`, `func_name`, `func_path`, `problem_statement`, `target_patch`, and `docker_image`. `messages` requires an additional `json.loads()` call. Spot-checked samples contain the original SWE-agent history and structured `tool_calls`.
+- `target_patch` is the T1 reference change; `rollout_patch` is GLM's T2 change. Neither is a correct answer confirmed by independent testing. The dataset card explicitly states that patch verification was not performed for the main experiments.
+- Current SERA checkout: `1ca8673bd527b164dc9eb89841c96416ec8ce1a7`; the SWE-agent submodule is pinned to `a593220bfdf9e07f7761179977b8ddf02fa981d5`.
 
-## 1. 在运行 agent 的机器安装环境
+## 1. Set up the environment on the agent host
 
-建议在 Linux x86_64、有 Docker 权限的机器上执行。模型服务可以在另一台机器；GPU 只需部署在模型服务端。数据集镜像名明确包含 `x86_64`，在 Apple Silicon 上需要模拟，速度和兼容性需要另行验证。
+Use a Linux x86_64 host with Docker access. The model service can run on another machine; GPUs are needed only on the model-serving host. The dataset image names explicitly include `x86_64`, so Apple Silicon requires emulation, with performance and compatibility verified separately.
 
-以下命令均从 SERA 仓库根目录运行：
+Run all commands below from the SERA repository root:
 
 ```bash
 conda create -n sera-replay python=3.12 -y
@@ -24,11 +24,11 @@ pip install -e . -e modules/code2flow -e modules/SERA-SWE-Agent
 docker info
 ```
 
-只做这里的 T2 replay 不需要 mini-swe-agent、GitHub mirror、重新解析代码调用图，也不需要重新运行 T1。当前本地 checkout 的两个 agent submodule 目录尚为空，需要初始化。
+This T2 replay does not require mini-swe-agent, a GitHub mirror, rebuilding code call graphs, or rerunning T1. Both agent submodule directories in the current local checkout are empty and need initialization.
 
-## 2. 确认模型服务支持 OpenAI tools
+## 2. Verify that the model service supports OpenAI tools
 
-这里的模型名称使用你的 `/v1/models` 返回的真实 ID，不假定“Qwen3.8 27B”对应某个公开权重名称。
+Use the actual model ID returned by your `/v1/models` endpoint. Do not assume that "Qwen3.8 27B" corresponds to a particular public model weight name.
 
 ```bash
 export QWEN_BASE_URL='http://YOUR_HOST:YOUR_PORT/v1'
@@ -37,7 +37,7 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-not-needed}"
 curl -sS "$QWEN_BASE_URL/models" -H "Authorization: Bearer $OPENAI_API_KEY"
 ```
 
-应验证 `chat.completions` 能返回结构化 `message.tool_calls`，其中包括合法 JSON `function.arguments`。仅能在文本里输出 `<tool_call>` 不足以让这里的 function-calling harness 正常工作。可用下面的小请求检查：
+Verify that `chat.completions` returns structured `message.tool_calls`, including valid JSON in `function.arguments`. Emitting `<tool_call>` in plain text is insufficient for this function-calling harness. Use this small request to check:
 
 ```bash
 python - <<'PY'
@@ -55,11 +55,11 @@ print(r.choices[0].message.model_dump_json(indent=2))
 PY
 ```
 
-仓库的 `sera/datagen/inference/launch_qwen3_models.sh` 是既有 Qwen3/vLLM 示例，采用 `--enable-auto-tool-choice --tool-call-parser hermes`。你的具体模型与 serving 版本可能需要其他 parser/chat template，应以实际返回的结构化 tool calls 为准。
+The repository's `sera/datagen/inference/launch_qwen3_models.sh` is an existing Qwen3/vLLM example using `--enable-auto-tool-choice --tool-call-parser hermes`. Your model and serving version may require a different parser or chat template; verify the structured tool calls actually returned.
 
-**推理文本需要单独检查**：固定版本的 `sweagent/agent/models.py` 保存 `message.content` 和 `tool_calls`，没有复制一般的 `reasoning_content` 字段。如果服务把推理全部放进该字段，原始 `.traj` 可能丢失这部分；`visible_think_chars=0` 不能解释为模型没有推理。比较推理长度之前，需确认服务把 `<think>…</think>` 保留在 `content`，或者修改 harness 显式记录单独的 reasoning 字段，并对两边采取一致的分析口径。
+**Check reasoning text separately**: the pinned version of `sweagent/agent/models.py` saves `message.content` and `tool_calls` but does not copy the commonly used `reasoning_content` field. If the service puts all reasoning in that field, the original `.traj` may omit it; `visible_think_chars=0` does not mean the model performed no reasoning. Before comparing reasoning lengths, confirm that the service preserves `<think>…</think>` in `content`, or modify the harness to explicitly record the separate reasoning field and apply consistent analysis criteria to both models.
 
-## 3. 准备固定任务集
+## 3. Prepare a fixed task set
 
 ```bash
 python scripts/replay_t2.py prepare \
@@ -67,33 +67,33 @@ python scripts/replay_t2.py prepare \
   --out experiments/qwen_t2_inputs
 ```
 
-输出包括：
+The outputs include:
 
-- `instances.json`：SWE-agent 输入，只包含原始初始 prompt、镜像和 base commit。
-- `prompt_overrides.yaml`：保留数据集已有完整首轮 user prompt，避免重新套模板导致空白或指令差异；system prompt 也从数据集读取。
-- `references.jsonl`：同一批 GLM 轨迹、T1 target patch、GLM rollout patch、repo 信息，留作比较。
-- `manifest.json`：来源版本、选中任务数、各 repo 数量与输入 SHA256。
+- `instances.json`: SWE-agent input containing only the original initial prompt, image, and base commit.
+- `prompt_overrides.yaml`: preserves the dataset's complete first user prompt to avoid whitespace or instruction differences introduced by reapplying templates; the system prompt is also read from the dataset.
+- `references.jsonl`: the corresponding GLM trajectories, T1 target patches, GLM rollout patches, and repository information for comparison.
+- `manifest.json`: source revision, selected task count, counts per repository, and input SHA256 hashes.
 
-脚本通过 `sera/constants.py` 的 `SWESMITH_IMAGES` 将**实际数据行的镜像**映射到 repo 和 base commit，映射不到会报错；不会把配置中额外的 repos 混入实验。输入中不额外暴露参考 patch 或采样函数位置；数据集原始问题描述已有的信息会原样保留。
+The script uses `SWESMITH_IMAGES` in `sera/constants.py` to map **the images in actual dataset rows** to repositories and base commits, and raises an error if no mapping exists. Extra repositories in the configuration are not added to the experiment. Inputs do not expose reference patches or sampled function locations beyond what is already present in the dataset's original problem statement, which is preserved unchanged.
 
-默认是源文件顺序的前 N 条，便于 smoke test，**不是随机或有代表性的评估集**。可限定 repo，或每个 repo 取最多 10 个：
+By default, the script selects the first N records in source-file order for a smoke test; this is **not a random or representative evaluation set**. You can restrict selection to a repository or take up to 10 tasks per repository:
 
 ```bash
 python scripts/replay_t2.py prepare \
   --repo msiemens/tinydb --limit 10 \
   --out experiments/tinydb_t2_inputs
 
-# 扫描所有行，实际出现的每个 repo 最多保留 10 条。
+# Scan all rows and retain up to 10 records per repository present in the data.
 python scripts/replay_t2.py prepare \
   --limit 0 --per-repo 10 \
   --out experiments/qwen_t2_per_repo10
 ```
 
-按 repo 筛选可能需要读很大一段源文件；`--limit 0 --per-repo 10` 会扫描整个约 9.81 GB JSONL。反复实验建议先下载固定版本到本地，然后用 `--source /path/to/dataset.jsonl`。输出目录必须为空，防止更换任务集后误用旧结果。全量 replay 用 `--limit 0`，并保留足够磁盘存储 reference 和轨迹。
+Filtering by repository may require reading a large portion of the source file; `--limit 0 --per-repo 10` scans the entire approximately 9.81 GB JSONL. For repeated experiments, download the pinned revision locally first, then use `--source /path/to/dataset.jsonl`. The output directory must be empty to prevent accidental reuse of old results after changing the task set. For a full replay, use `--limit 0` and reserve enough disk space for references and trajectories.
 
-## 4. 先跑 1 个任务，再跑固定任务集
+## 4. Run one task first, then the fixed task set
 
-以下直接调用本仓库固定版本的 SERA-SWE-Agent。T2 使用普通任务求解模式 `--pipeline False`。这个 fork 即使关闭 pipeline 也会读取 `pipeline_yaml`，因此一并传入。
+The command below directly invokes the repository's pinned SERA-SWE-Agent version. T2 uses the standard task-solving mode, `--pipeline False`. This fork reads `pipeline_yaml` even when the pipeline is disabled, so that argument is included as well.
 
 ```bash
 sweagent run-batch \
@@ -119,15 +119,15 @@ sweagent run-batch \
   --output_dir "$PWD/experiments/qwen_t2_raw"
 ```
 
-检查第一个任务的 `.traj`、`.pred`、日志和 `exit_status`，确认镜像能拉取、工具可用、模型确实执行工具。再删除命令中的 `--instances.slice 1`，将 `--num_workers` 改为 2 或 4，运行全部选中任务；同一 output directory 会按 harness 的恢复规则跳过已有完成轨迹。一个 27B endpoint 的并发从小值开始，根据服务吞吐和 Docker 容量提高。
+Inspect the first task's `.traj`, `.pred`, logs, and `exit_status` to confirm that the image can be pulled, the tools are available, and the model actually executes tools. Then remove `--instances.slice 1` and set `--num_workers` to 2 or 4 to run all selected tasks. When reusing the same output directory, the harness skips existing completed trajectories according to its resume rules. Start with low concurrency for a 27B endpoint and increase it based on serving throughput and Docker capacity.
 
-这些是**本次可控的试跑预算**：当前仓库默认 temperature=0.6、call limit=115；这里另选 32K 总上下文、最多 28K 输入和 4K 单次输出。数据卡未提供足够配置来确认发布轨迹的原始预算与这些完全一致，因此不可宣称精确复现历史采样。先固定并记录自己的预算，再检查两边差异。模型不同 tokenizer 的 token 长度也不是等价单位。
+These are **controlled budgets for this trial run**: the current repository defaults to temperature=0.6 and a call limit of 115; this example additionally selects a 32K total context, up to 28K input tokens, and 4K output tokens per call. The dataset card does not provide enough configuration details to confirm that the published trajectories used identical budgets, so this cannot be claimed as an exact reproduction of historical sampling. Fix and record your own budgets before examining differences. Token lengths from different model tokenizers are not equivalent units either.
 
-固定版本对 OpenAI provider 不会自动把 `max_output_tokens` 转发成请求的 `max_tokens`，所以这里也显式设置 `completion_kwargs.max_tokens`。输入 token 计数可能使用 LiteLLM fallback tokenizer；严格预算比较时，应配置适合实际权重的 `agent.model.custom_tokenizer`。服务端也应有明确的上下文限制，并记录 chat template、thinking 开关、sampling 参数和版本。
+For the OpenAI provider, the pinned version does not automatically forward `max_output_tokens` as the request's `max_tokens`, so `completion_kwargs.max_tokens` is also set explicitly. Input token counts may use a LiteLLM fallback tokenizer; for strict budget comparisons, configure `agent.model.custom_tokenizer` to match the actual model weights. Set an explicit context limit on the server as well, and record the chat template, thinking setting, sampling parameters, and versions.
 
-这里从镜像的原始 commit 开始求解；**不要预先应用 `target_patch` 或 `rollout_patch`**，否则把答案写进环境。实际运行后还应记录镜像 digest、容器内 `git rev-parse HEAD`、SWE-agent 的版本和实际工具 schemas；镜像名或 tag 本身不能保证未来内容不变。
+Solving starts from the image's original commit; **do not apply `target_patch` or `rollout_patch` beforehand**, as that would write the answer into the environment. After running, also record the image digest, `git rev-parse HEAD` inside the container, the SWE-agent version, and the actual tool schemas. An image name or tag alone does not guarantee that its contents will remain unchanged.
 
-## 5. 比较原始轨迹
+## 5. Compare raw trajectories
 
 ```bash
 python scripts/replay_t2.py compare \
@@ -136,24 +136,24 @@ python scripts/replay_t2.py compare \
   --out experiments/qwen_t2_comparison
 ```
 
-`summary.json` 和 `pairs.jsonl` 包含：
+`summary.json` and `pairs.jsonl` contain:
 
-- 覆盖率、missing 数、Qwen `exit_status`、提交率、非空 patch 比例。
-- 同一批有 Qwen `.traj` 的 ID 上，双方 assistant turns、tool calls、工具分布与顺序、assistant 字符数、可见 `<think>` 字符数。
-- 双方相对 T1 `target_patch` 的 changed-line recall/precision、recall≥0.5 和 recall=1 的比例；Qwen patch 与 GLM patch 完全一致的比例。
-- 首轮 system/user prompt 是否与数据集逐字匹配。出现不匹配应先排查再做模型归因。
+- Coverage, missing-task count, Qwen `exit_status`, submission rate, and the fraction of nonempty patches.
+- Assistant turns, tool calls, tool distributions and sequences, assistant character counts, and visible `<think>` character counts for both models on the same IDs with Qwen `.traj` files.
+- Changed-line recall/precision against the T1 `target_patch` for both models, the fractions with recall≥0.5 and recall=1, and the fraction of Qwen patches that exactly match the GLM patches.
+- Whether the first system/user prompts match the dataset verbatim. Investigate mismatches before attributing differences to the models.
 
-脚本保留失败和缺失任务。提交率、patch 匹配率使用所有选中任务作为分母；没有轨迹计为未达成。长度均值只比较双方都有原始轨迹的同一批 ID。细粒度分析可从 `pairs.jsonl` 按 repo 聚合；正式比较建议同时报告 micro 和 repo-macro 结果，并在固定样本上重复多次 Qwen rollout 来衡量采样波动。
+The script retains failed and missing tasks. Submission and patch-match rates use all selected tasks as the denominator; tasks without trajectories count as unsuccessful. Mean lengths are compared only on the same IDs with raw trajectories available for both models. For finer analysis, aggregate `pairs.jsonl` by repository. For a formal comparison, report both micro and repository-macro results, and repeat Qwen rollouts on a fixed sample to measure sampling variability.
 
-Recall 与本仓库 `compare_patch_recall` 采用相同的非空增删行匹配口径：保留正负号和重复次数，忽略 diff header、hunk、文件位置。**Recall=1 不等于 patch 完全相同，更不等于功能正确**；额外修改不会降低 recall。不同实现也可能功能等价，需要另行运行相关测试/复现脚本判定。参考 GLM 自身也应对 `target_patch` 打分，避免默认它总是正确。
+Recall uses the same nonempty added/deleted-line matching criteria as the repository's `compare_patch_recall`: signs and duplicate counts are preserved, while diff headers, hunks, and file locations are ignored. **Recall=1 does not imply an identical patch, let alone functional correctness**; extra changes do not reduce recall. Different implementations may also be functionally equivalent, which requires separate tests or reproduction scripts to determine. Score the GLM reference itself against `target_patch` as well, rather than assuming it is always correct.
 
-行为差异还可抽样人工标注：定位路径、是否先复现、是否运行验证、编辑次数、重复搜索/命令、工具参数错误、无效编辑和是否修改测试文件。基础脚本只统计可客观提取的指标，不把“命令里出现 pytest”自动当成验证成功。
+Behavioral differences can also be manually annotated on a sample: how the agent locates relevant code, whether it reproduces the issue first, whether it runs validation, edit counts, repeated searches or commands, tool argument errors, ineffective edits, and changes to test files. The basic script reports only objectively extractable metrics; it does not automatically treat a command containing "pytest" as successful validation.
 
-不要先走 `postprocess` 再做轨迹比较：默认 `enforce_submit=true` 会过滤未提交任务，`keep_only_think` 会改变 assistant 文本。保留 `.traj`/`.pred` 为分析来源；需要训练数据时另行生成相同口径的 Hermes/训练格式。
+Do not run `postprocess` before comparing trajectories: the default `enforce_submit=true` filters out tasks without submissions, and `keep_only_think` changes assistant text. Keep `.traj`/`.pred` as the analysis sources; if training data is needed, generate Hermes/training-format data separately using consistent criteria.
 
-## 如果目标是让 Qwen 自己生成全新的 T1→T2 数据
+## If the goal is to have Qwen generate entirely new T1→T2 data
 
-这属于另一种实验。可用 `swesmith_scaling`，将 `generate.existing_repos` 限制为参考数据实际出现的 repos，并替换模型：
+This is a different experiment. Use `swesmith_scaling`, restrict `generate.existing_repos` to repositories actually present in the reference data, and replace the model:
 
 ```bash
 python sera/main.py --config-name=swesmith_scaling \
@@ -164,6 +164,6 @@ python sera/main.py --config-name=swesmith_scaling \
   generate.fns_per_repo=10
 ```
 
-此命令默认仍使用配置文件内完整 repo 列表，必须先按你的选样要求修改/派生该列表。生成顺序为函数采样→T1 修改及合成 PR→T2 求解→patch recall 筛选→格式化。`stage=distill_stage_two` 表示从该阶段继续执行后面的 eval/postprocess，不是从 Hugging Face 自动导入 T2；它还依赖已有实验实例文件，不能单靠这个参数重跑发布数据。
+By default, this command still uses the full repository list in the configuration file; first modify that list or derive a new one to match your sampling requirements. Generation proceeds as function sampling → T1 changes and synthetic PR → T2 solving → patch recall filtering → formatting. `stage=distill_stage_two` resumes from that stage and continues through the subsequent eval/postprocess steps; it does not automatically import T2 tasks from Hugging Face. It also depends on existing experiment instance files, so this argument alone cannot replay the published data.
 
-对于当前“Qwen 与数据集轨迹差异”的目标，优先采用上面的同任务 replay。
+For the current goal of comparing Qwen trajectories with dataset trajectories, use the same-task replay described above.
