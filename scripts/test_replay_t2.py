@@ -80,6 +80,7 @@ class ReplayTests(unittest.TestCase):
             self.assertEqual(tasks[0]["problem_statement"], "full prompt\n\n")
             self.assertEqual(tasks[0]["extra_fields"], {})
             self.assertNotIn("target_patch", tasks[0])
+            self.assertEqual(tasks[0]['base_commit'], 'HEAD')
             output = root / "trajs" / "example_1"
             output.mkdir(parents=True)
             (output / "example_1.traj").write_text(json.dumps({

@@ -127,7 +127,7 @@ def prepare(args):
                 "instance_id": iid,
                 "image_name": image,
                 "repo_name": "testbed",
-                "base_commit": repo_info["base_commit"],
+                "base_commit": "HEAD",  # Pin the verified image's actual commit in the runner.
                 "problem_statement": user,
                 "extra_fields": {},
             })

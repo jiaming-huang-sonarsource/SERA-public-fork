@@ -13,6 +13,7 @@ import platform
 import subprocess
 import sys
 import threading
+from uuid import uuid4
 
 from qwen_t2_proxy import Proxy
 
@@ -40,6 +41,23 @@ def validate_inputs(inputs):
     return instances
 
 
+def prepare_image(image, patch):
+    """Restore verified task preimages before the agent sees the container."""
+    container = 'sera-t2-input-' + uuid4().hex
+    bootstrap = (ROOT / 'scripts/t2_image.py').read_text()
+    try:
+        result = subprocess.check_output(
+            ['docker', 'run', '-i', '--name', container, '--network', 'none',
+             '--entrypoint', 'python', image, '-c', bootstrap],
+            input=json.dumps({'target_patch': patch}), text=True)
+        identity = json.loads(result)
+        if identity['restored_preimage']:
+            image = subprocess.check_output(['docker', 'commit', container], text=True).strip()
+        return image, identity
+    finally:
+        subprocess.run(['docker', 'rm', '-f', container], check=True, stdout=subprocess.DEVNULL)
+
+
 def run(args):
     settings = json.loads(SETTINGS.read_text())
     inputs, out = args.inputs.resolve(), args.out.resolve()
@@ -58,6 +76,8 @@ def run(args):
     for name in ('instances.json', 'manifest.json', 'prompt_overrides.yaml', 'references.jsonl'):
         (snapshots / name).write_bytes((inputs / name).read_bytes())
     selected = copy.deepcopy(instances if args.all else instances[:1])
+    references = {r['instance_id']: r for r in
+                  (json.loads(line) for line in (inputs / 'references.jsonl').read_text().splitlines() if line.strip())}
     # Resolve the task image identities before executing any model-generated action.
     images = {}
     for instance in selected:
@@ -69,7 +89,11 @@ def run(args):
         images[image] = {key: info.get(key) for key in ('Id', 'RepoDigests', 'Architecture', 'Os')}
         if not info.get('RepoDigests'):
             raise ValueError(f'No immutable digest for task image: {image}')
-        instance['image_name'] = info['RepoDigests'][0]
+        instance['image_name'], baseline = prepare_image(
+            info['RepoDigests'][0], references[instance['instance_id']]['target_patch'])
+        instance['base_commit'] = baseline['base_commit']
+        images[image]['initial_state'] = baseline
+        images[image]['prepared_image'] = instance['image_name']
     run_instances = out / 'run-instances.json'
     run_instances.write_text(json.dumps(selected, ensure_ascii=False, indent=2) + '\n')
     proxy = Proxy(args.upstream, out / 'api', context_window=settings['context_window'])
@@ -101,7 +125,8 @@ def run(args):
                    '--output_dir', str(out / 'trajs')]
         sources = [SETTINGS, SELECTION, ROOT / 'sera/configs/sweagent/e2e.yaml',
                    ROOT / 'sera/configs/pipeline/default_pipeline.yaml', Path(__file__),
-                   ROOT / 'scripts/qwen_t2_proxy.py', config, run_instances, *snapshots.iterdir()]
+                   ROOT / 'scripts/qwen_t2_proxy.py', ROOT / 'scripts/t2_image.py',
+                   config, run_instances, *snapshots.iterdir()]
         manifest = dict(started_at=datetime.now(timezone.utc).isoformat(), settings=settings,
                         repository_commit=git('rev-parse', 'HEAD'), repository_status=git('status', '--porcelain'),
                         sweagent_revision=settings['sweagent_revision'], command=command, upstream=args.upstream,

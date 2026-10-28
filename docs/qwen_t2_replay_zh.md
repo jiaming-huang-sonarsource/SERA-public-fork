@@ -32,7 +32,9 @@ python scripts/run_qwen_t2.py --upstream "$QWEN_BASE_URL" --all \
   --out experiments/qwen_t2_run
 ```
 
-`run.json` 保存配置、依赖版本、输入哈希和镜像身份；`api/` 保存每次原始请求、响应和 token ID。`.traj` 中以 `<think>` 标注思考，下一轮还原成原生 reasoning 字段；think 外的普通回答完整保留。不要预先应用参考 patch，也不要对比较轨迹运行训练清洗。
+运行前按 diff 的旧 blob 校验初始代码；镜像已含参考修改时，仅反向还原并建立独立基线。镜像名后缀不能当作容器的 Git commit。
+
+`run.json` 保存配置、依赖版本、输入哈希、镜像及基线身份；`api/` 保存每次原始请求、响应和 token ID。`.traj` 中以 `<think>` 标注思考，下一轮还原成原生 reasoning 字段；think 外的普通回答完整保留。不要正向应用参考 patch，也不要对比较轨迹运行训练清洗。
 
 阅读原始内容，只展开换行并格式化；输出包含 `.txt`、`.json` 和一个简单选择页：
 
