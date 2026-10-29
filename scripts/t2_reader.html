@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SERA / Qwen 原始轨迹对比</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing:border-box; }
+  body { margin:0; height:100vh; height:100dvh; display:flex; flex-direction:column; font-family:system-ui,sans-serif; }
+  header { padding:10px 16px; border-bottom:1px solid #8886; display:flex; align-items:center; gap:12px; }
+  select { font:inherit; padding:4px; max-width:100%; }
+  details { margin-left:auto; flex-shrink:0; font-size:12px; }
+  summary { cursor:pointer; }
+  .rules { position:absolute; right:12px; top:46px; z-index:1; width:min(520px,calc(100vw - 24px)); max-height:70vh; overflow:auto; background:Canvas; color:CanvasText; border:1px solid #888; border-radius:4px; padding:12px 16px; line-height:1.65; box-shadow:0 3px 12px #0002; }
+  .rules p { margin:0 0 8px; }
+  .rules p:last-child { margin:0; }
+  main { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+  section { min-width:0; min-height:0; display:flex; flex-direction:column; }
+  section + section { border-left:1px solid #8886; }
+  h2 { margin:0; padding:8px 16px; font-size:14px; font-weight:600; border-bottom:1px solid #8886; }
+  .stats { padding:6px 16px; border-bottom:1px solid #8886; font-size:12px; line-height:1.6; display:flex; flex-wrap:wrap; gap:2px 14px; }
+  .stats[hidden] { display:none; }
+  .over { color:light-dark(#b42318,#ff9b91); font-weight:600; }
+  pre { flex:1; min-height:0; margin:0; padding:12px 16px; overflow:auto; font:13px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; tab-size:4; }
+  main.api { grid-template-columns:minmax(0,1fr); }
+  main.api #qwen-pane { display:none; }
+</style>
+<header>
+  <select id="trajectory" aria-label="任务"></select>
+  <details><summary>统计规则</summary><div class="rules">
+    <p>轮数 = assistant 消息数，包含重试；一次工具调用不重复累计此前的输入。</p>
+    <p>清洗按 SERA 默认 Hermes + keep_only_think：保留非空 think 和工具调用，去掉 think 外叙述；无 think 或 think 为空时，将叙述包入 think。system 换成含工具说明的训练提示，工具返回包装为 user/tool_response；原始轨迹显示不变。</p>
+    <p>清洗后 token = 整条训练序列，包含 system、user、工具返回和 ChatML 标记。仅 assistant 参与 loss，其余被 mask 但仍占上下文。thought/action 等辅助字段不重复计数。超过 32k（32,768）时，仓库训练配置会丢弃整条，不截断；格式校验失败或 Qwen 未提交显示不适用。参考数据缺少 exit_status，这里仅复现格式清洗。</p>
+    <p id="tokenizer-rule">__TOKENIZER__。计数使用训练 ChatML 模板，不使用生成模型的原生推理模板；这是训练长度，不是多轮 API 用量之和。</p>
+    <p>工具均长的“调用 / 返回”分别是每条工具调用（名称、参数、Hermes 标记，不含 think）与每条工具返回（含包装）的平均 token 数。Patch 行数为最终提交 diff 的新增 + 删除，包含空行，不含上下文和 diff 头。</p>
+  </div></details>
+</header>
+<main id="comparison">
+  <section aria-labelledby="sera-label">
+    <h2 id="sera-label">SERA（已发布 GLM-4.6）</h2>
+    <div id="sera-stats" class="stats" aria-label="SERA 统计" hidden></div>
+    <pre id="messages" tabindex="0">__FIRST_TRAJECTORY__</pre>
+  </section>
+  <section id="qwen-pane" aria-labelledby="qwen-label">
+    <h2 id="qwen-label">Qwen3.8-27B</h2>
+    <div id="qwen-stats" class="stats" aria-label="Qwen 统计" hidden></div>
+    <div id="qwen-note" class="stats" role="note" hidden></div>
+    <pre id="qwen-messages" tabindex="0">__FIRST_QWEN__</pre>
+  </section>
+</main>
+<script id="dataset" type="application/json">__T2_DATA__</script>
+<script>
+  const data = JSON.parse(document.getElementById('dataset').textContent);
+  const select = document.getElementById('trajectory');
+  const output = document.getElementById('messages');
+  const qwen = document.getElementById('qwen-messages');
+  const number = value => value == null ? '—' : Math.round(value).toLocaleString('en-US');
+  function renderStats(id, stats) {
+    const target = document.getElementById(id);
+    target.replaceChildren();
+    target.hidden = !stats;
+    if (!stats) return;
+    const add = (text, title = '', className = '') => {
+      const span = document.createElement('span');
+      span.textContent = text;
+      span.title = title;
+      span.className = className;
+      target.append(span);
+    };
+    const approx = stats.estimated ? '≈' : '';
+    add(`${number(stats.turns)} 轮`);
+    const tokens = stats.filtered_tokens;
+    const limit = tokens == null ? '' : tokens > 32768 ? '（超 32k）' : '（≤32k）';
+    add(tokens == null ? '清洗后 不适用' : `清洗后 ${approx}${number(tokens)} token${limit}`,
+        stats.filter_error || '整条训练序列，含被 mask 的上下文；32k = 32,768', tokens > 32768 ? 'over' : '');
+    add(`工具均长 调用 ${approx}${number(stats.tool_call_mean)} / 返回 ${approx}${number(stats.tool_result_mean)} token`,
+        `共 ${number(stats.tool_calls)} 次工具调用；不含 think`);
+    const patch = stats.patch;
+    add(patch ? `Patch ${number(patch.total)} 行（+${number(patch.added)} / −${number(patch.deleted)}）` : 'Patch 未知');
+  }
+  data.forEach((row,index) => select.add(new Option(row.id,index)));
+  function render() {
+    const row = data[Number(select.value)];
+    document.getElementById('comparison').classList.toggle('api', row.source === 'api');
+    document.getElementById('sera-label').textContent = row.source === 'api' ? 'API 原始记录' : 'SERA（已发布 GLM-4.6）';
+    output.textContent = row.text;
+    qwen.textContent = row.qwen_text ?? '尚无这条任务的 Qwen 轨迹。';
+    const note = document.getElementById('qwen-note');
+    note.textContent = row.qwen_note ?? '';
+    note.hidden = !row.qwen_note;
+    renderStats('sera-stats', row.stats);
+    renderStats('qwen-stats', row.qwen_stats);
+    output.scrollTop = qwen.scrollTop = 0;
+  }
+  select.onchange = render;
+  render();
+</script>
+</html>
